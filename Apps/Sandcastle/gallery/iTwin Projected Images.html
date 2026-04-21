@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no"
+    />
+    <meta
+      name="description"
+      content="Load 3D Tiles and projected images from an iTwin reality data service."
+    />
+    <meta name="cesium-sandcastle-labels" content="Development" />
+    <title>iTwin Projected Images</title>
+    <script type="text/javascript" src="../Sandcastle-header.js"></script>
+    <script
+      type="text/javascript"
+      src="../../../Build/CesiumUnminified/Cesium.js"
+      nomodule
+    ></script>
+    <script type="module" src="../load-cesium-es6.js"></script>
+  </head>
+  <body class="sandcastle-loading" data-sandcastle-bucket="bucket-requirejs.html">
+    <style>
+      @import url(../templates/bucket.css);
+      #statusPanel {
+        position: absolute;
+        bottom: 40px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 6px;
+        font: 13px monospace;
+        z-index: 100;
+        max-width: 400px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+    </style>
+    <div id="cesiumContainer" class="fullSize"></div>
+    <div id="loadingOverlay"><h1>Loading...</h1></div>
+    <div id="toolbar"></div>
+    <div id="statusPanel">Initializing...</div>
+    <script id="cesium_sandcastle_script">
+      window.startup = async function (Cesium) {
+        "use strict";
+        //Sandcastle_Begin
+
+        // --- Authentication ---
+        Cesium.ITwinPlatform.defaultShareKey =
+          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpVHdpbklkIjoiNjZhMmQzNTQtM2E5NS00ZGI5LThmMGQtYzZiNWM0Yzg2YzY0IiwiaWQiOiI4OWUyNDQyYS1jNTc1LTRlNzktODE0Ni02MjVmNGE5NzAwYzUiLCJleHAiOjE3ODQyMjUxMzR9.n8FvZfavpB-7sBlfQ_D3Z3Mj48I69tIFq2S2iUjezYo";
+
+        const iTwinId = "66a2d354-3a95-4db9-8f0d-c6b5c4c86c64";
+
+        const statusPanel = document.getElementById("statusPanel");
+        function log(msg) {
+          console.log(msg);
+          statusPanel.textContent += `\n${msg}`;
+        }
+
+        const viewer = new Cesium.Viewer("cesiumContainer", {
+          infoBox: false,
+          selectionIndicator: false,
+          terrain: Cesium.Terrain.fromWorldTerrain(),
+        });
+        const scene = viewer.scene;
+
+        // --- State tracking ---
+        let currentTileset;
+        let currentCollection;
+        let currentHandler;
+        const currentClickHandler = undefined;
+        let preRenderListener;
+
+        function clearTileset() {
+          if (Cesium.defined(currentTileset)) {
+            scene.primitives.remove(currentTileset);
+            currentTileset = undefined;
+          }
+        }
+
+        function clearCollection() {
+          if (Cesium.defined(preRenderListener)) {
+            preRenderListener();
+            preRenderListener = undefined;
+          }
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.destroy();
+            currentHandler = undefined;
+          }
+          if (Cesium.defined(currentCollection)) {
+            scene.primitives.remove(currentCollection);
+            currentCollection = undefined;
+          }
+        }
+
+        // --- Step 1: List all reality data ---
+        log("Listing reality data...");
+        let allData;
+        try {
+          allData = await Cesium.ITwinPlatform.listRealityData(iTwinId);
+          log(`Found ${allData.length} reality data items:`);
+          for (const rd of allData) {
+            log(`  [${rd.type}] ${rd.displayName} (${rd.id})`);
+          }
+        } catch (e) {
+          log(`Error listing data: ${e.message}`);
+          return;
+        }
+
+        const meshTypes = [
+          "Cesium3DTiles",
+          "RealityMesh3DTiles",
+          "PNTS",
+          "Terrain3DTiles",
+          "GS_3DT",
+        ];
+        const meshItems = allData.filter((rd) => meshTypes.includes(rd.type));
+        const ccItems = allData.filter((rd) => rd.type === "CCOrientations");
+        const imageItems = allData.filter((rd) => rd.type === "CCImageCollection");
+
+        // --- Step 2: Build 3D Tiles dropdown ---
+        const tilesetOptions = [{ text: "(none)", onselect: clearTileset }];
+        function makeTilesetHandler(item) {
+          return async function () {
+            clearTileset();
+            log(`Loading 3D Tiles: ${item.displayName}...`);
+            try {
+              currentTileset = await Cesium.ITwinData.createTilesetForRealityDataId({
+                iTwinId: iTwinId,
+                realityDataId: item.id,
+                type: item.type,
+                rootDocument: item.rootDocument,
+              });
+              scene.primitives.add(currentTileset);
+              log(`  ✓ Loaded ${item.displayName}`);
+              viewer.flyTo(currentTileset);
+            } catch (e) {
+              log(`  ✗ Failed: ${e.message}`);
+            }
+          };
+        }
+        for (const item of meshItems) {
+          tilesetOptions.push({
+            text: `${item.displayName}`,
+            onselect: makeTilesetHandler(item),
+          });
+        }
+        Sandcastle.addToolbarMenu(tilesetOptions, "toolbar");
+
+        // --- Step 3: Build CCOrientations dropdown ---
+        const ccOptions = [{ text: "(no orientations)", onselect: clearCollection }];
+        function makeCCHandler(ccItem) {
+          return async function () {
+            clearCollection();
+            log(`Loading CCOrientations: ${ccItem.displayName}...`);
+            try {
+              currentCollection =
+                await Cesium.ITwinData.createProjectedImageCollectionForRealityDataId({
+                  iTwinId: iTwinId,
+                  realityDataId: ccItem.id,
+                  imageRealityDataId:
+                    imageItems.length > 0 ? imageItems[0].id : undefined,
+                  defaultPlaneDistance: 10.0,
+                  showFrustums: true,
+                  showCameraIcons: true,
+                  showLabels: true,
+                  alpha: 1.0,
+                  frustumColor: Cesium.Color.WHITE,
+                });
+              scene.primitives.add(currentCollection);
+              log(`  ✓ Loaded ${currentCollection.length} projected images`);
+
+              // Handler
+              currentHandler = new Cesium.ProjectedImageCollectionHandler(
+                currentCollection,
+                scene,
+                {
+                  enabled: autoSelectEnabled,
+                  weights: { alignment: 0.7, distance: 0.3 },
+                  hysteresis: 0.05,
+                  threshold: 0.05,
+                },
+              );
+
+              // Status HUD
+              preRenderListener = scene.preRender.addEventListener(function () {
+                if (!Cesium.defined(currentHandler)) {
+                  return;
+                }
+                const best = currentHandler.currentBestItem;
+                if (best) {
+                  const score = Cesium.ProjectedImageCollection.computeViewScore(
+                    best,
+                    scene.camera,
+                    currentHandler.weights,
+                  ).toFixed(3);
+                  statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score})`;
+                } else if (orbitActive) {
+                  statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
+                } else {
+                  statusPanel.textContent = "Active: none";
+                }
+              });
+            } catch (e) {
+              log(`  ✗ CCOrientations failed: ${e.message}`);
+              console.error(e);
+            }
+          };
+        }
+        for (const ccItem of ccItems) {
+          ccOptions.push({
+            text: `${ccItem.displayName}`,
+            onselect: makeCCHandler(ccItem),
+          });
+        }
+        Sandcastle.addToolbarMenu(ccOptions, "toolbar");
+
+        // --- Toggles ---
+        let autoSelectEnabled = true;
+        Sandcastle.addToggleButton("Auto-select best view", true, function (checked) {
+          autoSelectEnabled = checked;
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.enabled = checked;
+            if (!checked && Cesium.defined(currentCollection)) {
+              for (let i = 0; i < currentCollection.length; i++) {
+                currentCollection.setItemShow(currentCollection.get(i), true);
+              }
+            }
+          }
+        });
+
+        Sandcastle.addToggleButton("Show frustums", true, function (checked) {
+          if (Cesium.defined(currentCollection)) {
+            currentCollection.showFrustums = checked;
+          }
+        });
+
+        Sandcastle.addToggleButton("Show labels", true, function (checked) {
+          if (Cesium.defined(currentCollection)) {
+            currentCollection.showLabels = checked;
+          }
+        });
+
+        // --- Orbit-around-point & camera-icon fly-to (global double-click) ---
+        let orbitActive = false;
+        let orbitMarker;
+
+        function unlockOrbit() {
+          if (!orbitActive) {
+            return;
+          }
+          viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+          orbitActive = false;
+          if (Cesium.defined(orbitMarker)) {
+            viewer.entities.remove(orbitMarker);
+            orbitMarker = undefined;
+          }
+          statusPanel.textContent = "Orbit unlocked";
+        }
+
+        const globalClickHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+        globalClickHandler.setInputAction(function (click) {
+          // 1. If a camera icon was clicked, fly to that camera's view
+          if (Cesium.defined(currentCollection)) {
+            const picked = scene.pick(click.position);
+            if (Cesium.defined(picked)) {
+              const item = currentCollection.getItemFromPick(picked);
+              if (Cesium.defined(item)) {
+                unlockOrbit();
+                viewer.camera.flyTo({
+                  destination: item.cameraPosition,
+                  orientation: {
+                    direction: item.cameraDirection,
+                    up: item.cameraUp,
+                  },
+                  duration: 1.0,
+                });
+                return;
+              }
+            }
+          }
+
+          // 2. Otherwise, pick a 3D position and set it as the orbit center
+          const pickedPosition = scene.pickPosition(click.position);
+          if (!Cesium.defined(pickedPosition)) {
+            return;
+          }
+
+          unlockOrbit(); // clear any previous orbit
+
+          // Place a small marker at the focal point
+          orbitMarker = viewer.entities.add({
+            position: pickedPosition,
+            point: {
+              pixelSize: 10,
+              color: Cesium.Color.CYAN,
+              outlineColor: Cesium.Color.WHITE,
+              outlineWidth: 2,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          });
+
+          // Compute direction from camera to the new focal point
+          const camPos = Cesium.Cartesian3.clone(scene.camera.positionWC);
+          const direction = Cesium.Cartesian3.subtract(
+            pickedPosition,
+            camPos,
+            new Cesium.Cartesian3(),
+          );
+          const range = Cesium.Cartesian3.magnitude(direction);
+          Cesium.Cartesian3.normalize(direction, direction);
+
+          // Use the ellipsoid-normal "up" at the camera position so the
+          // camera stays gravity-aligned throughout the transition.
+          const gravityUp = Cesium.Cartesian3.normalize(camPos, new Cesium.Cartesian3());
+          // Build a right vector perpendicular to the look direction and gravity up
+          const right = Cesium.Cartesian3.cross(
+            direction,
+            gravityUp,
+            new Cesium.Cartesian3(),
+          );
+          Cesium.Cartesian3.normalize(right, right);
+          // Re-derive up so it's exactly perpendicular to direction
+          const up = Cesium.Cartesian3.cross(right, direction, new Cesium.Cartesian3());
+          Cesium.Cartesian3.normalize(up, up);
+
+          statusPanel.textContent = "Flying to focal point…";
+
+          // Smoothly rotate the camera to look at the new point, then lock orbit
+          viewer.camera.flyTo({
+            destination: camPos,
+            orientation: { direction: direction, up: up },
+            duration: 0.6,
+            complete: function () {
+              viewer.camera.lookAt(
+                pickedPosition,
+                new Cesium.HeadingPitchRange(
+                  viewer.camera.heading,
+                  viewer.camera.pitch,
+                  range,
+                ),
+              );
+              orbitActive = true;
+              statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
+            },
+          });
+        }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
+        // Escape key unlocks orbit mode
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") {
+            unlockOrbit();
+          }
+        });
+
+        //Sandcastle_End
+      };
+      if (typeof Cesium !== "undefined") {
+        window.startupCalled = true;
+        window.startup(Cesium).catch((error) => {
+          "use strict";
+          console.error(error);
+        });
+      }
+    </script>
+  </body>
+</html>

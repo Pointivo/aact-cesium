@@ -7,6 +7,7 @@ import Check from "../Core/Check.js";
 import KmlDataSource from "../DataSources/KmlDataSource.js";
 import GeoJsonDataSource from "../DataSources/GeoJsonDataSource.js";
 import DeveloperError from "../Core/DeveloperError.js";
+import ProjectedImageCollection from "./ProjectedImageCollection.js";
 
 /**
  * Methods for loading iTwin platform data into CesiumJS
@@ -279,6 +280,188 @@ ITwinData.loadGeospatialFeatures = async function ({
   });
 
   return GeoJsonDataSource.load(resource);
+};
+
+/**
+ * Create a {@link ProjectedImageCollection} from a CCOrientations or CCImageCollection
+ * reality data item associated with the given iTwin.
+ *
+ * This loads the ccOrientations XML, parses it, and resolves image URLs
+ * from a companion CCImageCollection in the same iTwin (or from the same
+ * reality data container if images are co-located).
+ *
+ * @experimental This feature is not final and is subject to change without Cesium's standard deprecation policy.
+ *
+ * @param {object} options
+ * @param {string} options.iTwinId The id of the iTwin
+ * @param {string} options.realityDataId The id of the CCOrientations reality data
+ * @param {string} [options.imageRealityDataId] The id of the CCImageCollection reality data.
+ *   If not provided, the function will search for a CCImageCollection in the same iTwin.
+ * @param {number} [options.defaultPlaneDistance=50.0] Default projection plane distance.
+ * @param {boolean} [options.showFrustums=true] Show frustum wireframes.
+ * @param {boolean} [options.showCameraIcons=true] Show camera icons.
+ * @param {boolean} [options.showLabels=false] Show camera labels.
+ * @param {number} [options.alpha=1.0] Default image alpha.
+ * @returns {Promise<ProjectedImageCollection>}
+ *
+ * @throws {RuntimeError} If the reality data type is not CCOrientations
+ * @throws {RuntimeError} If no CCImageCollection is found and imageRealityDataId is not provided
+ */
+ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
+  iTwinId,
+  realityDataId,
+  imageRealityDataId,
+  defaultPlaneDistance,
+  showFrustums,
+  showCameraIcons,
+  showLabels,
+  alpha,
+  frustumColor,
+}) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.string("iTwinId", iTwinId);
+  Check.typeOf.string("realityDataId", realityDataId);
+  //>>includeEnd('debug');
+
+  // 1. Get ccOrientations metadata and URL
+  const metadata = await ITwinPlatform.getRealityDataMetadata(
+    iTwinId,
+    realityDataId,
+  );
+
+  const supportedTypes = [ITwinPlatform.RealityDataType.CCOrientations];
+  if (!supportedTypes.includes(metadata.type)) {
+    throw new RuntimeError(
+      `Reality data type "${metadata.type}" is not CCOrientations`,
+    );
+  }
+
+  // Get the orientations XML URL.
+  // If rootDocument is defined, use the standard URL resolver.
+  // Otherwise, get the container URL and try common root document names.
+  let orientationsUrl;
+  if (defined(metadata.rootDocument)) {
+    orientationsUrl = await ITwinPlatform.getRealityDataURL(
+      iTwinId,
+      realityDataId,
+      metadata.rootDocument,
+    );
+  } else {
+    // No rootDocument — get container and try to find the XML
+    const containerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+      iTwinId,
+      realityDataId,
+    );
+    // Try common ccOrientations root document names
+    const candidates = [
+      "Orientations/Orientations.xml",
+      "orientations.xml",
+      "Orientations.xml",
+      "ccorientations.xml",
+      "CCOrientations.xml",
+    ];
+    let found = false;
+    for (const candidate of candidates) {
+      const candidateUrlObj = new URL(containerUrl);
+      candidateUrlObj.pathname = `${candidateUrlObj.pathname}/${candidate}`;
+      const testUrl = candidateUrlObj.toString();
+      try {
+        const testResource = new Resource({ url: testUrl });
+        const text = await testResource.fetchText();
+        if (defined(text) && text.indexOf("<BlocksExchange") !== -1) {
+          orientationsUrl = testUrl;
+          found = true;
+          break;
+        }
+      } catch (e) {
+        // not found, try next
+      }
+    }
+    if (!found) {
+      throw new RuntimeError(
+        `Could not find ccOrientations XML in container for reality data ${realityDataId}. ` +
+          `No rootDocument was specified in the metadata. ` +
+          `Tried: ${candidates.join(", ")}`,
+      );
+    }
+  }
+
+  // 2. Resolve the image container URL
+  let imageContainerUrl;
+
+  if (defined(imageRealityDataId)) {
+    imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+      iTwinId,
+      imageRealityDataId,
+    );
+  } else {
+    // Search for a CCImageCollection in the same iTwin
+    const allData = await ITwinPlatform.listRealityData(iTwinId, {
+      types: [ITwinPlatform.RealityDataType.CCImageCollection],
+    });
+
+    if (allData.length === 0) {
+      // Fall back: try resolving images from the same container as orientations
+      imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+        iTwinId,
+        realityDataId,
+      );
+    } else {
+      // Use the first CCImageCollection found
+      imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+        iTwinId,
+        allData[0].id,
+      );
+    }
+  }
+
+  // 3. Build the image URL resolver
+  // The ccOrientations XML contains relative image paths;
+  // we resolve them against the image container URL
+  const containerUrlObj = new URL(imageContainerUrl);
+  const containerBase = `${containerUrlObj.origin}${containerUrlObj.pathname}`;
+  const containerSearch = containerUrlObj.search; // SAS token
+
+  // Extract the container name (last path segment, typically a GUID)
+  const pathSegments = containerUrlObj.pathname.split("/").filter((s) => s);
+  const containerName = pathSegments[pathSegments.length - 1];
+
+  const resolveImageUrl = function (imagePath) {
+    // imagePath may have backslashes from Windows paths in the XML
+    let normalized = imagePath.replace(/\\/g, "/");
+
+    // Strip leading container name if the ImagePath redundantly includes it
+    // e.g. "753c3ff9-.../image.jpg" → "image.jpg"
+    if (normalized.startsWith(`${containerName}/`)) {
+      normalized = normalized.substring(containerName.length + 1);
+    }
+
+    const url = `${containerBase}/${normalized}${containerSearch}`;
+    return url;
+  };
+
+  // Log the container and a sample URL for debugging
+  console.log("Image container base:", containerBase);
+  console.log(
+    "Sample image URL will look like:",
+    resolveImageUrl("sample/image.jpg"),
+  );
+
+  // 4. Fetch and parse the ccOrientations XML
+  const collection = await ProjectedImageCollection.fromCCOrientationsUrl(
+    orientationsUrl,
+    {
+      resolveImageUrl: resolveImageUrl,
+      defaultPlaneDistance: defaultPlaneDistance ?? 50.0,
+      showFrustums: showFrustums,
+      showCameraIcons: showCameraIcons,
+      showLabels: showLabels,
+      alpha: alpha,
+      frustumColor: frustumColor,
+    },
+  );
+
+  return collection;
 };
 
 export default ITwinData;

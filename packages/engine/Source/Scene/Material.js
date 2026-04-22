@@ -28,7 +28,6 @@ import PolylineArrowMaterial from "../Shaders/Materials/PolylineArrowMaterial.js
 import PolylineDashMaterial from "../Shaders/Materials/PolylineDashMaterial.js";
 import PolylineGlowMaterial from "../Shaders/Materials/PolylineGlowMaterial.js";
 import PolylineOutlineMaterial from "../Shaders/Materials/PolylineOutlineMaterial.js";
-import ProjectedImageMaterial from "../Shaders/Materials/ProjectedImageMaterial.js";
 import RimLightingMaterial from "../Shaders/Materials/RimLightingMaterial.js";
 import Sampler from "../Renderer/Sampler.js";
 import SlopeRampMaterial from "../Shaders/Materials/SlopeRampMaterial.js";
@@ -1439,28 +1438,6 @@ Material._materialCache.addMaterial(Material.ImageType, {
         "texture(image, fract(repeat * materialInput.st)).rgb * color.rgb",
       alpha: "texture(image, fract(repeat * materialInput.st)).a * color.a",
     },
-  },
-  translucent: function (material) {
-    return material.uniforms.color.alpha < 1.0;
-  },
-});
-
-/**
- * Gets the name of the projected image material with UV region support.
- * @type {string}
- * @readonly
- */
-Material.ProjectedImageType = "ProjectedImage";
-Material._materialCache.addMaterial(Material.ProjectedImageType, {
-  fabric: {
-    type: Material.ProjectedImageType,
-    uniforms: {
-      image: Material.DefaultImageId,
-      color: new Color(1.0, 1.0, 1.0, 1.0),
-      uvOffset: new Cartesian2(0.0, 0.0),
-      uvScale: new Cartesian2(1.0, 1.0),
-    },
-    source: ProjectedImageMaterial,
   },
   translucent: function (material) {
     return material.uniforms.color.alpha < 1.0;

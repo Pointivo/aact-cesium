@@ -377,15 +377,7 @@
                     currentHandler.weights,
                   ).toFixed(3);
                   const iiif = best.primitive._iiifImageSource;
-                  let lod = "N/A";
-                  if (iiif) {
-                    if (iiif._regionMode && iiif._loadedRegion) {
-                      const r = iiif._loadedRegion;
-                      lod = `crop ${r.w}×${r.h}`;
-                    } else {
-                      lod = `${iiif._currentLodLevel}px`;
-                    }
-                  }
+                  const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
                   statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
 
                   // Snap camera to best image location when enabled

@@ -294,7 +294,7 @@
               Prefer: "return=representation",
             },
           });
-          resource.appendQueryParameters({ subClass: "Project", $top: "100" });
+          resource.appendQueryParameters({ $top: "100" });
           const resp = await resource.fetchJson();
           const iTwins = resp.iTwins || [];
           log(`Found ${iTwins.length} iTwins`);
@@ -310,6 +310,12 @@
             opt.textContent = itwin.displayName || itwin.number || itwin.id;
             iTwinSelect.appendChild(opt);
           }
+
+          // Manual ID entry option
+          const customOpt = document.createElement("option");
+          customOpt.value = "__custom__";
+          customOpt.textContent = "Enter ID manually…";
+          iTwinSelect.appendChild(customOpt);
         } catch (e) {
           log(`Error fetching iTwins: ${e.message}`);
           console.error(e);
@@ -384,7 +390,16 @@
         }
 
         iTwinSelect.addEventListener("change", function () {
-          onITwinSelected(this.value);
+          if (this.value === "__custom__") {
+            const id = prompt("Enter iTwin ID:");
+            if (id && id.trim()) {
+              onITwinSelected(id.trim());
+            } else {
+              this.value = "";
+            }
+          } else {
+            onITwinSelected(this.value);
+          }
         });
 
         // --- On 3D Tiles selection ---

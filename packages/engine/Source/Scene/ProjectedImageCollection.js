@@ -12,10 +12,12 @@ import IIIFImageSource from "./IIIFImageSource.js";
 import LabelCollection from "./LabelCollection.js";
 import LabelStyle from "./LabelStyle.js";
 import Matrix3 from "../Core/Matrix3.js";
+import Matrix4 from "../Core/Matrix4.js";
 import PerspectiveFrustum from "../Core/PerspectiveFrustum.js";
 import PrimitiveCollection from "./PrimitiveCollection.js";
 import ProjectedImagePrimitive from "./ProjectedImagePrimitive.js";
 import Resource from "../Core/Resource.js";
+import Transforms from "../Core/Transforms.js";
 import VerticalOrigin from "./VerticalOrigin.js";
 
 const ProjectionType = ProjectedImagePrimitive.ProjectionType;
@@ -965,16 +967,26 @@ ProjectedImageCollection.fromContextSceneJson = async function (
       continue;
     }
 
-    const worldToCamera = opkToRotationMatrix(
+    // OPK angles are relative to local ENU frame at camera position.
+    // Compute camera position first so we can build the ENU→ECEF transform.
+    const cameraPosition = contextSceneCenterToCartesian3(pose.Center, srsDef);
+
+    const opkMatrix = opkToRotationMatrix(
       rot.omega || 0,
       rot.phi || 0,
       rot.kappa || 0,
     );
-    const cameraToWorld = Matrix3.transpose(worldToCamera, new Matrix3());
+    // R_opk maps local ENU → camera; camera→ECEF = R_enu_to_ecef * R_opk^T
+    const opkTransposed = Matrix3.transpose(opkMatrix, new Matrix3());
+    const enuToEcef4 = Transforms.eastNorthUpToFixedFrame(cameraPosition);
+    const enuToEcef3 = Matrix4.getMatrix3(enuToEcef4, new Matrix3());
+    const cameraToWorld = Matrix3.multiply(
+      enuToEcef3,
+      opkTransposed,
+      new Matrix3(),
+    );
 
     adjustRotationForCameraOrientation(cameraToWorld, "XRightYDown");
-
-    const cameraPosition = contextSceneCenterToCartesian3(pose.Center, srsDef);
 
     const imagePath = photo.ImagePath || "";
     const colonIdx = imagePath.indexOf(":");

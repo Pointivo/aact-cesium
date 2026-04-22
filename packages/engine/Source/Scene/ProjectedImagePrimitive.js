@@ -13,6 +13,7 @@ import GeometryAttributes from "../Core/GeometryAttributes.js";
 import GeometryInstance from "../Core/GeometryInstance.js";
 import Matrix3 from "../Core/Matrix3.js";
 import PrimitiveType from "../Core/PrimitiveType.js";
+import ContextLimits from "../Renderer/ContextLimits.js";
 import IIIFImageSource from "./IIIFImageSource.js";
 import Material from "./Material.js";
 import MaterialAppearance from "./MaterialAppearance.js";
@@ -647,7 +648,7 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
     const iiif = this._iiifImageSource;
 
     if (!iiif._maxTextureSizeSet) {
-      iiif.setMaxTextureSize(frameState.context.maximumTextureSize);
+      iiif.setMaxTextureSize(ContextLimits.maximumTextureSize);
     }
 
     const screenPixels = IIIFImageSource.computeScreenPixels(

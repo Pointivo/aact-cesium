@@ -38,6 +38,13 @@ function IIIFImageSource(options) {
   this._lodLevels = [256, 512, 1024, 2048].filter(
     (s) => s <= this._maxSourceDimension,
   );
+  // Include full-res level if it exceeds the highest power-of-2 level
+  if (
+    this._maxSourceDimension > 2048 &&
+    this._lodLevels[this._lodLevels.length - 1] !== this._maxSourceDimension
+  ) {
+    this._lodLevels.push(this._maxSourceDimension);
+  }
   if (this._lodLevels.length === 0) {
     this._lodLevels = [this._maxSourceDimension];
   }

@@ -502,6 +502,7 @@
                   best,
                   scene.camera,
                   currentHandler.weights,
+                  currentHandler.targetPoint,
                 ).toFixed(3);
                 const iiif = best.primitive._iiifImageSource;
                 const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
@@ -578,6 +579,9 @@
           if (Cesium.defined(orbitMarker)) {
             viewer.entities.remove(orbitMarker);
             orbitMarker = undefined;
+          }
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.targetPoint = undefined;
           }
           statusPanel.textContent = "Orbit unlocked";
         }
@@ -665,6 +669,9 @@
                 ),
               );
               orbitActive = true;
+              if (Cesium.defined(currentHandler)) {
+                currentHandler.targetPoint = pickedPosition;
+              }
               statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
             },
           });

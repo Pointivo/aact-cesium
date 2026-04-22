@@ -53,6 +53,7 @@ function ProjectedImageCollectionHandler(collection, scene, options) {
   this._hysteresis = options.hysteresis ?? 0.05;
   this._showOnlyBest = options.showOnlyBest ?? true;
   this._currentBestItem = undefined;
+  this._targetPoint = undefined;
 
   this._preRenderListener = scene.preRender.addEventListener(
     ProjectedImageCollectionHandler.prototype._onPreRender,
@@ -156,6 +157,22 @@ Object.defineProperties(ProjectedImageCollectionHandler.prototype, {
       return this._currentBestItem;
     },
   },
+
+  /**
+   * Optional target point for scoring. When set, images are scored by how well
+   * the source camera covers this point rather than by viewer direction alignment.
+   * Set to the orbit pivot to get stable, target-aware image selection.
+   * @memberof ProjectedImageCollectionHandler.prototype
+   * @type {Cartesian3|undefined}
+   */
+  targetPoint: {
+    get: function () {
+      return this._targetPoint;
+    },
+    set: function (value) {
+      this._targetPoint = value;
+    },
+  },
 });
 
 /**
@@ -169,6 +186,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
   const collection = this._collection;
   const camera = this._scene.camera;
   const length = collection.length;
+  const tp = this._targetPoint;
 
   if (length === 0) {
     this._currentBestItem = undefined;
@@ -185,6 +203,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
       item,
       camera,
       this._weights,
+      tp,
     );
 
     if (score > bestScore) {
@@ -202,6 +221,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
         this._currentBestItem,
         camera,
         this._weights,
+        tp,
       ) +
         this._hysteresis
   ) {
@@ -210,6 +230,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
       bestItem,
       camera,
       this._weights,
+      tp,
     );
   }
 
@@ -234,6 +255,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
         item,
         camera,
         this._weights,
+        tp,
       );
       collection.setItemShow(item, score >= this._threshold);
     }

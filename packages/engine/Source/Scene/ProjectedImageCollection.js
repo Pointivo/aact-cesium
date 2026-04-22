@@ -383,48 +383,68 @@ ProjectedImageCollection.prototype.destroy = function () {
 // ---------------------------------------------------------------------------
 
 const scratchToCamera = new Cartesian3();
+const scratchToTarget = new Cartesian3();
 
 /**
  * Compute a 0–1 score indicating how well a projected image item matches
  * the current viewer camera. Higher scores mean better alignment.
  *
- * The score combines:
- * - **Alignment** (dot product of viewer direction and source camera direction)
- * - **Distance** (inverse distance from viewer to source camera position)
+ * When a `targetPoint` is provided (e.g. an orbit pivot), the score is based
+ * on whether the source camera was looking at the target and how close it was.
+ * This produces stable scores independent of the viewer's position, preventing
+ * feedback loops when snapping to an image moves the viewer camera.
+ *
+ * Without a target point, the score uses viewer direction alignment and
+ * viewer-to-camera proximity (the original heuristic).
  *
  * @param {object} item An item from the collection.
  * @param {Camera} viewerCamera The viewer's camera (e.g. `viewer.camera`).
  * @param {object} [weights] Scoring weights.
- * @param {number} [weights.alignment=0.7] Weight for directional alignment (0–1).
+ * @param {number} [weights.alignment=0.7] Weight for directional alignment / target coverage (0–1).
  * @param {number} [weights.distance=0.3] Weight for proximity (0–1).
+ * @param {Cartesian3} [targetPoint] Optional point of interest (e.g. orbit center).
  * @returns {number} Score in approximately [0, 1]. Higher is better.
  */
 ProjectedImageCollection.computeViewScore = function (
   item,
   viewerCamera,
   weights,
+  targetPoint,
 ) {
   const wAlign = (weights && weights.alignment) ?? 0.7;
   const wDist = (weights && weights.distance) ?? 0.3;
+  const refDist = item.options.planeDistance ?? 50.0;
 
-  // Alignment: dot product of viewer direction and source camera direction
-  // Both are unit vectors; dot ranges from -1 (opposite) to +1 (same direction)
+  if (defined(targetPoint)) {
+    // Target-based scoring: does the source camera see the target?
+    Cartesian3.subtract(targetPoint, item.cameraPosition, scratchToTarget);
+    const distToTarget = Cartesian3.magnitude(scratchToTarget);
+
+    // Coverage: dot product of source forward with direction to target
+    if (distToTarget > 0) {
+      Cartesian3.divideByScalar(scratchToTarget, distToTarget, scratchToTarget);
+    }
+    const coverageDot = Cartesian3.dot(item.cameraDirection, scratchToTarget);
+    const coverageScore = (coverageDot + 1.0) * 0.5;
+
+    // Distance from source camera to target
+    const distanceScore = refDist / (refDist + distToTarget);
+
+    return wAlign * coverageScore + wDist * distanceScore;
+  }
+
+  // Fallback: viewer-based scoring
   const viewerDir = viewerCamera.directionWC;
   const camDir = item.cameraDirection;
   const dot = Cartesian3.dot(viewerDir, camDir);
-  // Remap [-1, 1] → [0, 1]
   const alignmentScore = (dot + 1.0) * 0.5;
 
-  // Distance: inverse distance, normalized by a reference distance
   Cartesian3.subtract(
     item.cameraPosition,
     viewerCamera.positionWC,
     scratchToCamera,
   );
   const dist = Cartesian3.magnitude(scratchToCamera);
-  // Use a smooth falloff: score = 1 / (1 + dist/refDist)
-  // refDist is the planeDistance as a reasonable scale reference
-  const refDist = item.options.planeDistance ?? 50.0;
   const distanceScore = refDist / (refDist + dist);
 
   return wAlign * alignmentScore + wDist * distanceScore;

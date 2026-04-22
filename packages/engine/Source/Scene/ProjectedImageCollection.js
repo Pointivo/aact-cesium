@@ -1,6 +1,8 @@
 import BillboardCollection from "./BillboardCollection.js";
 import buildModuleUrl from "../Core/buildModuleUrl.js";
 import Cartesian3 from "../Core/Cartesian3.js";
+import Cartographic from "../Core/Cartographic.js";
+import CesiumMath from "../Core/Math.js";
 import Check from "../Core/Check.js";
 import Color from "../Core/Color.js";
 import DebugCameraPrimitive from "./DebugCameraPrimitive.js";
@@ -67,6 +69,7 @@ function ProjectedImageCollection(options) {
   this._showLabels = options.showLabels ?? false;
   this._frustumColor = Color.clone(options.frustumColor ?? Color.YELLOW);
   this._defaultPlaneDistance = options.defaultPlaneDistance ?? 50.0;
+  this._frustumScale = options.frustumScale ?? 1.0;
 
   this._cameraIconUrl = buildModuleUrl("Assets/Textures/maki/camera.png");
 }
@@ -240,8 +243,8 @@ ProjectedImageCollection.prototype.add = function (options) {
   const debugFrustum = new PerspectiveFrustum();
   debugFrustum.fov = fovX;
   debugFrustum.aspectRatio = aspectRatio;
-  debugFrustum.near = 1.0;
-  debugFrustum.far = planeDistance;
+  debugFrustum.near = 0.1 * this._frustumScale;
+  debugFrustum.far = planeDistance * this._frustumScale;
 
   const cameraProxy = {
     positionWC: Cartesian3.clone(options.cameraPosition),
@@ -418,21 +421,29 @@ ProjectedImageCollection.computeViewScore = function (
   const refDist = item.options.planeDistance ?? 50.0;
 
   if (defined(targetPoint)) {
-    // Target-based scoring: does the source camera see the target?
+    // Coverage: source camera points toward the target
     Cartesian3.subtract(targetPoint, item.cameraPosition, scratchToTarget);
     const distToTarget = Cartesian3.magnitude(scratchToTarget);
-
-    // Coverage: dot product of source forward with direction to target
     if (distToTarget > 0) {
       Cartesian3.divideByScalar(scratchToTarget, distToTarget, scratchToTarget);
     }
     const coverageDot = Cartesian3.dot(item.cameraDirection, scratchToTarget);
     const coverageScore = (coverageDot + 1.0) * 0.5;
 
+    // Viewer alignment: source camera looks in a similar direction to the
+    // current viewer so the selected image matches the viewer's perspective.
+    const alignDot = Cartesian3.dot(
+      viewerCamera.directionWC,
+      item.cameraDirection,
+    );
+    const alignScore = (alignDot + 1.0) * 0.5;
+
     // Distance from source camera to target
     const distanceScore = refDist / (refDist + distToTarget);
 
-    return wAlign * coverageScore + wDist * distanceScore;
+    // Coverage acts as a gate: cameras not seeing the target score low.
+    // Among cameras that do see it, alignment picks the matching viewpoint.
+    return coverageScore * (wAlign * alignScore + wDist * distanceScore);
   }
 
   // Fallback: viewer-based scoring
@@ -493,6 +504,7 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
 
   const collection = new ProjectedImageCollection({
     defaultPlaneDistance: options.defaultPlaneDistance ?? 50.0,
+    frustumScale: options.frustumScale,
     showFrustums: options.showFrustums,
     showCameraIcons: options.showCameraIcons,
     showLabels: options.showLabels,
@@ -540,9 +552,8 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
         }
 
         // Parse pose
-        const worldToCamera = parseRotationMatrix(rotation);
-        // ccOrientations stores world→camera; we need camera→world (transpose)
-        const cameraToWorld = Matrix3.transpose(worldToCamera, new Matrix3());
+        // ccOrientations stores camera→world rotation (columns = camera axes in world).
+        const cameraToWorld = parseRotationMatrix(rotation);
 
         // Handle CameraOrientation convention
         // Default is XRightYDown: camera X = right, Y = down
@@ -559,6 +570,45 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
         const cy = parseFloat(getTextContent(center, "y", "0"));
         const cz = parseFloat(getTextContent(center, "z", "0"));
         const cameraPosition = new Cartesian3(cx, cy, cz);
+
+        // Debug: log raw matrix and derived direction for first 5 cameras
+        if (collection._items.length < 5) {
+          const photoId_ = getTextContent(photo, "Id", "?");
+          const fwd = new Cartesian3();
+          Matrix3.getColumn(cameraToWorld, 2, fwd);
+          // Convert ECEF position to lon/lat/alt for context
+          const carto = Cartographic.fromCartesian(cameraPosition);
+          const lonDeg = CesiumMath.toDegrees(carto.longitude).toFixed(6);
+          const latDeg = CesiumMath.toDegrees(carto.latitude).toFixed(6);
+          const altM = carto.height.toFixed(1);
+          // Compute ENU-relative direction to understand local orientation
+          const enuMatrix4 = Transforms.eastNorthUpToFixedFrame(cameraPosition);
+          const enuMatrix3 = Matrix4.getMatrix3(enuMatrix4, new Matrix3());
+          const enuInv = Matrix3.transpose(enuMatrix3, new Matrix3());
+          const localFwd = Matrix3.multiplyByVector(
+            enuInv,
+            fwd,
+            new Cartesian3(),
+          );
+          console.log(
+            `[DEBUG CAM ${photoId_}] pos=(${lonDeg}, ${latDeg}, alt=${altM}m) ` +
+              `ECEF fwd=(${fwd.x.toFixed(4)}, ${fwd.y.toFixed(4)}, ${fwd.z.toFixed(4)}) ` +
+              `ENU fwd=(E:${localFwd.x.toFixed(4)}, N:${localFwd.y.toFixed(4)}, Up:${localFwd.z.toFixed(4)})`,
+          );
+          // Also log raw M_ij from XML
+          const m00 = parseFloatTag(rotation, "M_00", 0);
+          const m01 = parseFloatTag(rotation, "M_01", 0);
+          const m02 = parseFloatTag(rotation, "M_02", 0);
+          const m10 = parseFloatTag(rotation, "M_10", 0);
+          const m11 = parseFloatTag(rotation, "M_11", 0);
+          const m12 = parseFloatTag(rotation, "M_12", 0);
+          const m20 = parseFloatTag(rotation, "M_20", 0);
+          const m21 = parseFloatTag(rotation, "M_21", 0);
+          const m22 = parseFloatTag(rotation, "M_22", 0);
+          console.log(
+            `  Raw XML M: [${m00.toFixed(4)}, ${m01.toFixed(4)}, ${m02.toFixed(4)}; ${m10.toFixed(4)}, ${m11.toFixed(4)}, ${m12.toFixed(4)}; ${m20.toFixed(4)}, ${m21.toFixed(4)}, ${m22.toFixed(4)}]`,
+          );
+        }
 
         // Compute focal length in pixels
         const fxPx = pgParams.focalLengthPx;
@@ -927,6 +977,7 @@ ProjectedImageCollection.fromContextSceneJson = async function (
 
   const collection = new ProjectedImageCollection({
     defaultPlaneDistance: options.defaultPlaneDistance ?? 50.0,
+    frustumScale: options.frustumScale,
     showFrustums: options.showFrustums,
     showCameraIcons: options.showCameraIcons,
     showLabels: options.showLabels,
@@ -967,26 +1018,109 @@ ProjectedImageCollection.fromContextSceneJson = async function (
       continue;
     }
 
-    // OPK angles are relative to local ENU frame at camera position.
-    // Compute camera position first so we can build the ENU→ECEF transform.
+    // Debug: dump raw Rotation object structure for first camera
+    if (collection._items.length === 0 && !collection._debugDumped) {
+      collection._debugDumped = true;
+      console.log(`[DEBUG] Raw pose.Rotation keys:`, Object.keys(rot));
+      console.log(`[DEBUG] Raw pose.Rotation:`, JSON.stringify(rot));
+      console.log(`[DEBUG] Raw pose.Center:`, JSON.stringify(pose.Center));
+      console.log(`[DEBUG] Raw pose keys:`, Object.keys(pose));
+    }
+
     const cameraPosition = contextSceneCenterToCartesian3(pose.Center, srsDef);
 
-    const opkMatrix = opkToRotationMatrix(
-      rot.omega || 0,
-      rot.phi || 0,
-      rot.kappa || 0,
-    );
-    // R_opk maps local ENU → camera; camera→ECEF = R_enu_to_ecef * R_opk^T
-    const opkTransposed = Matrix3.transpose(opkMatrix, new Matrix3());
+    // ENU→ECEF is needed for the heading fix and for geographic-SRS data.
     const enuToEcef4 = Transforms.eastNorthUpToFixedFrame(cameraPosition);
     const enuToEcef3 = Matrix4.getMatrix3(enuToEcef4, new Matrix3());
-    const cameraToWorld = Matrix3.multiply(
-      enuToEcef3,
-      opkTransposed,
-      new Matrix3(),
-    );
 
-    adjustRotationForCameraOrientation(cameraToWorld, "XRightYDown");
+    let cameraToWorld;
+    if (isEcefSrs(srsDef)) {
+      // ECEF SRS (e.g. Calib): OPK encodes Rx(ω)*Ry(φ)*Rz(κ) = camera→ECEF
+      // in XRightYDownZForward convention. We obtain R_xyz via
+      // transpose(Rz(-κ)*Ry(-φ)*Rx(-ω)).
+      const opkNeg = opkToRotationMatrix(
+        -(rot.omega || 0),
+        -(rot.phi || 0),
+        -(rot.kappa || 0),
+      );
+      cameraToWorld = Matrix3.transpose(opkNeg, new Matrix3());
+      // Negate col1 (camera-down → camera-up) for CesiumJS convention
+      // → result is [right, up, forward].
+      const col1 = Matrix3.getColumn(cameraToWorld, 1, new Cartesian3());
+      Cartesian3.negate(col1, col1);
+      Matrix3.setColumn(cameraToWorld, 1, col1, cameraToWorld);
+    } else {
+      // Geographic SRS (e.g. FIP): OPK = Rz(κ)*Ry(φ)*Rx(ω) maps ENU→camera
+      // in XRightYUpZBackward convention. camera→ECEF = enuToEcef * R^T.
+      const opkMatrix = opkToRotationMatrix(
+        rot.omega || 0,
+        rot.phi || 0,
+        rot.kappa || 0,
+      );
+      const opkTransposed = Matrix3.transpose(opkMatrix, new Matrix3());
+      cameraToWorld = Matrix3.multiply(
+        enuToEcef3,
+        opkTransposed,
+        new Matrix3(),
+      );
+      // Fix 180° heading error: horizontally reflect cols 1 and 2
+      // (negate horizontal component, keep vertical) to convert
+      // backward→forward → result is [right, up, forward].
+      const upEcef = Matrix3.getColumn(enuToEcef3, 2, new Cartesian3());
+      for (const colIdx of [1, 2]) {
+        const col = Matrix3.getColumn(cameraToWorld, colIdx, new Cartesian3());
+        const dotUp = Cartesian3.dot(col, upEcef);
+        const reflected = Cartesian3.multiplyByScalar(
+          upEcef,
+          2 * dotUp,
+          new Cartesian3(),
+        );
+        Cartesian3.subtract(reflected, col, reflected);
+        Matrix3.setColumn(cameraToWorld, colIdx, reflected, cameraToWorld);
+      }
+    }
+
+    // Debug: collect orientation stats for all cameras
+    if (!collection._debugStats) {
+      collection._debugStats = {
+        cameras: [],
+        minAlt: Infinity,
+        maxAlt: -Infinity,
+      };
+    }
+    {
+      const fwd = new Cartesian3();
+      Matrix3.getColumn(cameraToWorld, 2, fwd);
+      const carto = Cartographic.fromCartesian(cameraPosition);
+      const altM = carto.height;
+      const ecefToEnu = Matrix3.transpose(enuToEcef3, new Matrix3());
+      const localFwd = Matrix3.multiplyByVector(
+        ecefToEnu,
+        fwd,
+        new Cartesian3(),
+      );
+      const pitchDeg =
+        Math.atan2(
+          localFwd.z,
+          Math.sqrt(localFwd.x * localFwd.x + localFwd.y * localFwd.y),
+        ) *
+        (180 / Math.PI);
+      collection._debugStats.cameras.push({
+        id: photoId,
+        alt: altM,
+        pitchDeg,
+        enuFwd: { e: localFwd.x, n: localFwd.y, u: localFwd.z },
+        opk: [rot.omega || 0, rot.phi || 0, rot.kappa || 0],
+      });
+      collection._debugStats.minAlt = Math.min(
+        collection._debugStats.minAlt,
+        altM,
+      );
+      collection._debugStats.maxAlt = Math.max(
+        collection._debugStats.maxAlt,
+        altM,
+      );
+    }
 
     const imagePath = photo.ImagePath || "";
     const colonIdx = imagePath.indexOf(":");
@@ -1034,6 +1168,69 @@ ProjectedImageCollection.fromContextSceneJson = async function (
       name: `Photo ${photoId}`,
       id: `photo-${photoId}`,
     });
+  }
+
+  // Debug: dump orientation summary
+  if (collection._debugStats) {
+    const stats = collection._debugStats;
+    const cams = stats.cameras;
+    cams.sort((a, b) => a.alt - b.alt);
+    console.log(`[DEBUG] Orientation summary for ${cams.length} cameras:`);
+    console.log(
+      `[DEBUG] Altitude range: ${stats.minAlt.toFixed(1)}m - ${stats.maxAlt.toFixed(1)}m`,
+    );
+
+    const range = stats.maxAlt - stats.minAlt;
+    const buckets = [
+      {
+        label: "lowest 10%",
+        cams: cams.filter((c) => c.alt <= stats.minAlt + range * 0.1),
+      },
+      {
+        label: "middle 40-60%",
+        cams: cams.filter(
+          (c) =>
+            c.alt > stats.minAlt + range * 0.4 &&
+            c.alt <= stats.minAlt + range * 0.6,
+        ),
+      },
+      {
+        label: "highest 10%",
+        cams: cams.filter((c) => c.alt > stats.minAlt + range * 0.9),
+      },
+    ];
+    for (const b of buckets) {
+      if (b.cams.length === 0) {
+        continue;
+      }
+      const avgPitch =
+        b.cams.reduce((s, c) => s + c.pitchDeg, 0) / b.cams.length;
+      const sample = b.cams[Math.floor(b.cams.length / 2)];
+      console.log(
+        `[DEBUG] ${b.label}: ${b.cams.length} cams, avgPitch=${avgPitch.toFixed(1)}°, ` +
+          `sampleAlt=${sample.alt.toFixed(1)}m, samplePitch=${sample.pitchDeg.toFixed(1)}°, ` +
+          `OPK=(${sample.opk.map((v) => v.toFixed(3)).join(", ")}), ` +
+          `ENU fwd=(E:${sample.enuFwd.e.toFixed(3)}, N:${sample.enuFwd.n.toFixed(3)}, Up:${sample.enuFwd.u.toFixed(3)})`,
+      );
+    }
+
+    console.log(`[DEBUG] Lowest 3 cameras (expected: nearly horizontal):`);
+    for (let i = 0; i < Math.min(3, cams.length); i++) {
+      const c = cams[i];
+      console.log(
+        `[DEBUG]   cam ${c.id}: alt=${c.alt.toFixed(1)}m pitch=${c.pitchDeg.toFixed(1)}° OPK=(${c.opk.map((v) => v.toFixed(3)).join(", ")}) ENU fwd=(E:${c.enuFwd.e.toFixed(3)}, N:${c.enuFwd.n.toFixed(3)}, Up:${c.enuFwd.u.toFixed(3)})`,
+      );
+    }
+    console.log(
+      `[DEBUG] Highest 3 cameras (expected: looking down -45° to -90°):`,
+    );
+    for (let i = Math.max(0, cams.length - 3); i < cams.length; i++) {
+      const c = cams[i];
+      console.log(
+        `[DEBUG]   cam ${c.id}: alt=${c.alt.toFixed(1)}m pitch=${c.pitchDeg.toFixed(1)}° OPK=(${c.opk.map((v) => v.toFixed(3)).join(", ")}) ENU fwd=(E:${c.enuFwd.e.toFixed(3)}, N:${c.enuFwd.n.toFixed(3)}, Up:${c.enuFwd.u.toFixed(3)})`,
+      );
+    }
+    delete collection._debugStats;
   }
 
   return collection;

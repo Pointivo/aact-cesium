@@ -348,7 +348,9 @@ function getRayDirectionForNdc(ndcX, ndcY, intrinsics, result) {
   // Undistort
   undistortNormalizedPoint(scratchNormalized, distortion, projectionType);
 
-  // Ray direction in camera space: [xn, yn, 1] (camera looks along +Z)
+  // Ray direction in camera space: [xn, yn, 1]
+  // Y stays in image convention (Y-down) because the texture coordinates
+  // are also Y-down, so the two conventions cancel out.
   result.x = scratchNormalized.x;
   result.y = scratchNormalized.y;
   result.z = 1.0;
@@ -616,10 +618,30 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
     );
 
     const appearance = new MaterialAppearance({
-      material: Material.fromType("Image", {
-        image: this._image,
-        repeat: new Cartesian2(1.0, 1.0),
-        color: tintColor,
+      material: new Material({
+        fabric: {
+          uniforms: {
+            image: this._image,
+            color: tintColor,
+            borderColor: new Color(1.0, 1.0, 1.0, 1.0),
+            borderWidth: 0.01,
+          },
+          source: `czm_material czm_getMaterial(czm_materialInput materialInput) {
+  czm_material material = czm_getDefaultMaterial(materialInput);
+  vec2 st = materialInput.st;
+  float bw = borderWidth;
+  if (st.x < bw || st.x > 1.0 - bw || st.y < bw || st.y > 1.0 - bw) {
+    material.diffuse = borderColor.rgb;
+    material.alpha = borderColor.a;
+  } else {
+    vec4 texColor = texture(image, st);
+    material.diffuse = texColor.rgb * color.rgb;
+    material.alpha = texColor.a * color.a;
+  }
+  return material;
+}`,
+        },
+        translucent: this._alpha < 1.0,
       }),
       faceForward: true,
       flat: true, // no lighting — show original image colors

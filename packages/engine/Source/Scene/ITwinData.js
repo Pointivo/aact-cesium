@@ -319,6 +319,7 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
   iiifBaseUrl,
   iiifAuthHeader,
   defaultPlaneDistance,
+  frustumScale,
   showFrustums,
   showCameraIcons,
   showLabels,
@@ -496,6 +497,7 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
   const collectionOptions = {
     resolveImageUrl: resolveImageUrl,
     defaultPlaneDistance: defaultPlaneDistance ?? 50.0,
+    frustumScale: frustumScale,
     showFrustums: showFrustums,
     showCameraIcons: showCameraIcons,
     showLabels: showLabels,

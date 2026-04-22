@@ -230,6 +230,7 @@
           selectionIndicator: false,
           terrain: Cesium.Terrain.fromWorldTerrain(),
         });
+        window.__viewer = viewer;
         const scene = viewer.scene;
 
         // --- State tracking ---
@@ -456,7 +457,8 @@
                 imageRealityDataId:
                   currentImageItems.length > 0 ? currentImageItems[0].id : undefined,
                 iiifBaseUrl: IIIF_BASE_URL,
-                defaultPlaneDistance: 10.0,
+                defaultPlaneDistance: 5.0,
+                frustumScale: 0.1,
                 showFrustums: true,
                 showCameraIcons: true,
                 showLabels: true,
@@ -464,6 +466,7 @@
                 frustumColor: Cesium.Color.WHITE,
               });
             scene.primitives.add(currentCollection);
+            window.__collection = currentCollection;
             log(`  ✓ Loaded ${currentCollection.length} projected images`);
 
             currentHandler = new Cesium.ProjectedImageCollectionHandler(
@@ -489,12 +492,24 @@
                   Cesium.defined(previousBestItem) &&
                   Cesium.defined(previousBestItem.frustumPrimitive)
                 ) {
-                  previousBestItem.frustumPrimitive.show = currentCollection.showFrustums;
+                  previousBestItem.frustumPrimitive.show =
+                    currentCollection.showFrustums || showAllFrustums;
                 }
                 if (Cesium.defined(best) && Cesium.defined(best.frustumPrimitive)) {
-                  best.frustumPrimitive.show = false;
+                  best.frustumPrimitive.show = showAllFrustums ? true : false;
                 }
                 previousBestItem = best;
+              }
+
+              // When "Show all frustums" is on, force all frustums visible
+              // (the handler's setItemShow hides non-best items each frame)
+              if (showAllFrustums) {
+                for (let i = 0; i < currentCollection.length; i++) {
+                  const item = currentCollection.get(i);
+                  if (Cesium.defined(item.frustumPrimitive)) {
+                    item.frustumPrimitive.show = true;
+                  }
+                }
               }
 
               if (best) {
@@ -551,6 +566,19 @@
           snapToImageEnabled = checked;
           if (!checked) {
             lastSnappedItem = undefined;
+          }
+        });
+
+        let showAllFrustums = false;
+        Sandcastle.addToggleButton("Show all frustums", false, function (checked) {
+          showAllFrustums = checked;
+          if (Cesium.defined(currentCollection)) {
+            for (let i = 0; i < currentCollection.length; i++) {
+              const item = currentCollection.get(i);
+              if (Cesium.defined(item.frustumPrimitive)) {
+                item.frustumPrimitive.show = checked || currentCollection.showFrustums;
+              }
+            }
           }
         });
 

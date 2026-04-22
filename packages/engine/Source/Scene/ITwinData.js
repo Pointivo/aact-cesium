@@ -336,10 +336,13 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
     realityDataId,
   );
 
-  const supportedTypes = [ITwinPlatform.RealityDataType.CCOrientations];
+  const supportedTypes = [
+    ITwinPlatform.RealityDataType.CCOrientations,
+    ITwinPlatform.RealityDataType.ContextScene,
+  ];
   if (!supportedTypes.includes(metadata.type)) {
     throw new RuntimeError(
-      `Reality data type "${metadata.type}" is not CCOrientations`,
+      `Reality data type "${metadata.type}" is not CCOrientations or ContextScene`,
     );
   }
 

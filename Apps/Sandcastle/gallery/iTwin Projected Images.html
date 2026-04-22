@@ -353,7 +353,10 @@
             log(`Found ${allData.length} reality data items`);
 
             currentMeshItems = allData.filter((rd) => meshTypes.includes(rd.type));
-            currentCCItems = allData.filter((rd) => rd.type === "CCOrientations");
+            const csItems = allData.filter((rd) => rd.type === "ContextScene");
+            const ccItems = allData.filter((rd) => rd.type === "CCOrientations");
+            // Prefer ContextScene (has pose data) over CCOrientations (may be input-only)
+            currentCCItems = [...csItems, ...ccItems];
             currentImageItems = allData.filter((rd) => rd.type === "CCImageCollection");
 
             // Populate 3D Tiles dropdown
@@ -376,12 +379,12 @@
             for (const item of currentCCItems) {
               const opt = document.createElement("option");
               opt.value = item.id;
-              opt.textContent = item.displayName;
+              opt.textContent = `${item.displayName} [${item.type}]`;
               ccSelect.appendChild(opt);
             }
 
             log(
-              `  ${currentMeshItems.length} mesh, ${currentCCItems.length} CC, ${currentImageItems.length} image collections`,
+              `  ${currentMeshItems.length} mesh, ${csItems.length} ContextScene, ${ccItems.length} CCOrientations, ${currentImageItems.length} image collections`,
             );
           } catch (e) {
             log(`Error listing reality data: ${e.message}`);

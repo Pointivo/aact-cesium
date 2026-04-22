@@ -471,21 +471,42 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
   });
 
   const blocks = doc.querySelectorAll("Block");
+  console.log(`CCOrientations: ${blocks.length} blocks found`);
   for (const block of blocks) {
     const photogroups = block.querySelectorAll("Photogroup");
+    console.log(`  Block has ${photogroups.length} photogroups`);
     for (const photogroup of photogroups) {
       const pgParams = parsePhotogroupIntrinsics(photogroup);
       const photos = photogroup.querySelectorAll("Photo");
+      console.log(`    Photogroup has ${photos.length} photos`);
+
+      let skippedNoPose = 0;
+      let skippedNoRotCenter = 0;
+      let skippedImageResolve = 0;
+      let loggedSample = false;
 
       for (const photo of photos) {
+        // Log first photo's child elements to debug structure
+        if (!loggedSample) {
+          const childTags = Array.from(photo.children).map((c) => c.tagName);
+          console.log("    First photo child elements:", childTags.join(", "));
+          console.log(
+            "    First photo XML:",
+            photo.outerHTML.substring(0, 500),
+          );
+          loggedSample = true;
+        }
+
         const pose = photo.querySelector("Pose");
         if (!pose) {
+          skippedNoPose++;
           continue; // Skip photos without pose data
         }
 
         const rotation = pose.querySelector("Rotation");
         const center = pose.querySelector("Center");
         if (!rotation || !center) {
+          skippedNoRotCenter++;
           continue;
         }
 
@@ -523,6 +544,7 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
         try {
           imageUrl = await options.resolveImageUrl(imagePath);
         } catch {
+          skippedImageResolve++;
           continue; // Skip photos whose images can't be resolved
         }
 
@@ -570,6 +592,10 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
           id: `photo-${photoId}`,
         });
       }
+
+      console.log(
+        `    Skipped: ${skippedNoPose} no pose, ${skippedNoRotCenter} no rot/center, ${skippedImageResolve} image resolve failed`,
+      );
     }
   }
 

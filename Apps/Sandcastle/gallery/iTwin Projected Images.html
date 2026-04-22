@@ -43,45 +43,60 @@
     <div id="loadingOverlay"><h1>Loading...</h1></div>
     <div id="toolbar"></div>
     <div id="statusPanel">Initializing...</div>
+    <!-- Blocking login overlay -->
     <div
-      id="iiifLoginOverlay"
-      style="display: none; position: absolute; top: 10px; right: 10px; z-index: 200"
+      id="loginOverlay"
+      style="
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.85);
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        color: #fff;
+        font-family: sans-serif;
+      "
     >
+      <h2 style="margin-bottom: 16px">iTwin Projected Images</h2>
+      <p style="margin-bottom: 24px; color: #aaa">
+        Sign in with your Bentley account to continue
+      </p>
       <button
-        id="iiifLoginBtn"
+        id="loginBtn"
         style="
-          font: 13px sans-serif;
-          padding: 8px 16px;
+          font: 16px sans-serif;
+          padding: 12px 32px;
           cursor: pointer;
           background: #4a90d9;
           color: #fff;
           border: none;
-          border-radius: 6px;
+          border-radius: 8px;
         "
       >
-        Login for IIIF Images
+        Sign In
       </button>
-      <span
-        id="iiifLoginStatus"
-        style="color: #fff; font: 12px monospace; margin-left: 8px"
-      ></span>
+      <p id="loginStatus" style="margin-top: 12px; color: #888; font: 12px monospace"></p>
     </div>
     <script id="cesium_sandcastle_script">
       window.startup = async function (Cesium) {
         "use strict";
         //Sandcastle_Begin
 
-        // --- IIIF Tile Server Config ---
+        // --- Config ---
         const IIIF_BASE_URL = "https://iiif.aact-platform-dev.pointivo.com";
-
-        // --- OAuth2 PKCE for IIIF image auth ---
         const IMS_AUTHORITY = "https://ims.bentley.com";
         const AUTHORIZE_URL = `${IMS_AUTHORITY}/connect/authorize`;
         const TOKEN_URL = `${IMS_AUTHORITY}/connect/token`;
-        const IIIF_CLIENT_ID = "spa-kq3hJXgDnc7C86yCjeMV3CA38";
-        const IIIF_SCOPES = "itwin-platform";
-        const IIIF_REDIRECT_URI = window.location.origin + window.location.pathname;
+        const CLIENT_ID = "spa-kq3hJXgDnc7C86yCjeMV3CA38";
+        const SCOPES = "itwin-platform";
+        const REDIRECT_URI = window.location.origin + window.location.pathname;
 
+        // --- OAuth2 PKCE helpers ---
         function generateCodeVerifier() {
           const array = new Uint8Array(64);
           crypto.getRandomValues(array);
@@ -100,9 +115,9 @@
             .replace(/=/g, "");
         }
 
-        function getStoredIiifToken() {
+        function getStoredToken() {
           try {
-            const data = JSON.parse(sessionStorage.getItem("iiif_token"));
+            const data = JSON.parse(sessionStorage.getItem("itwin_token"));
             if (data && data.access_token && data.expires_at > Date.now() / 1000) {
               return data;
             }
@@ -112,19 +127,19 @@
           return null;
         }
 
-        async function iiifAuthenticate() {
+        async function startLogin() {
           const codeVerifier = generateCodeVerifier();
           const codeChallenge = await generateCodeChallenge(codeVerifier);
           const state = generateCodeVerifier().substring(0, 32);
 
-          sessionStorage.setItem("iiif_pkce_verifier", codeVerifier);
-          sessionStorage.setItem("iiif_pkce_state", state);
+          sessionStorage.setItem("pkce_verifier", codeVerifier);
+          sessionStorage.setItem("pkce_state", state);
 
           const params = new URLSearchParams({
-            client_id: IIIF_CLIENT_ID,
+            client_id: CLIENT_ID,
             response_type: "code",
-            redirect_uri: IIIF_REDIRECT_URI,
-            scope: IIIF_SCOPES,
+            redirect_uri: REDIRECT_URI,
+            scope: SCOPES,
             state: state,
             code_challenge: codeChallenge,
             code_challenge_method: "S256",
@@ -134,7 +149,7 @@
           window.location.href = `${AUTHORIZE_URL}?${params.toString()}`;
         }
 
-        async function handleIiifAuthCallback() {
+        async function handleAuthCallback() {
           const params = new URLSearchParams(window.location.search);
           const code = params.get("code");
           const state = params.get("state");
@@ -143,8 +158,8 @@
             return false;
           }
 
-          const savedState = sessionStorage.getItem("iiif_pkce_state");
-          const codeVerifier = sessionStorage.getItem("iiif_pkce_verifier");
+          const savedState = sessionStorage.getItem("pkce_state");
+          const codeVerifier = sessionStorage.getItem("pkce_verifier");
 
           if (state !== savedState || !codeVerifier) {
             return false;
@@ -153,14 +168,12 @@
           try {
             const resp = await fetch(TOKEN_URL, {
               method: "POST",
-              headers: {
-                "Content-Type": "application/x-www-form-urlencoded",
-              },
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({
                 grant_type: "authorization_code",
-                client_id: IIIF_CLIENT_ID,
+                client_id: CLIENT_ID,
                 code: code,
-                redirect_uri: IIIF_REDIRECT_URI,
+                redirect_uri: REDIRECT_URI,
                 code_verifier: codeVerifier,
               }),
             });
@@ -171,48 +184,34 @@
 
             const tokenData = await resp.json();
             tokenData.expires_at = Date.now() / 1000 + (tokenData.expires_in || 3600);
-            sessionStorage.setItem("iiif_token", JSON.stringify(tokenData));
+            sessionStorage.setItem("itwin_token", JSON.stringify(tokenData));
 
-            sessionStorage.removeItem("iiif_pkce_verifier");
-            sessionStorage.removeItem("iiif_pkce_state");
+            sessionStorage.removeItem("pkce_verifier");
+            sessionStorage.removeItem("pkce_state");
 
-            window.location.href = IIIF_REDIRECT_URI;
+            window.location.href = REDIRECT_URI;
             return true;
           } catch (e) {
-            console.error("IIIF auth failed:", e);
+            console.error("Auth failed:", e);
             return false;
           }
         }
 
-        // Handle OAuth callback if present
-        await handleIiifAuthCallback();
+        // --- Handle OAuth callback or require login ---
+        await handleAuthCallback();
 
-        // Get IIIF token (may be null if not logged in yet)
-        const iiifToken = getStoredIiifToken();
-        const iiifAuthHeader = iiifToken ? `Bearer ${iiifToken.access_token}` : undefined;
-
-        // Show login button if not authenticated for IIIF
-        const iiifLoginOverlay = document.getElementById("iiifLoginOverlay");
-        const iiifLoginBtn = document.getElementById("iiifLoginBtn");
-        const iiifLoginStatus = document.getElementById("iiifLoginStatus");
-
-        if (!iiifToken) {
-          iiifLoginOverlay.style.display = "block";
-          iiifLoginStatus.textContent = "Not logged in — images via Azure";
-          iiifLoginBtn.addEventListener("click", function () {
-            iiifAuthenticate();
-          });
-        } else {
-          iiifLoginOverlay.style.display = "block";
-          iiifLoginStatus.textContent = "✓ IIIF authenticated";
-          iiifLoginBtn.style.display = "none";
+        const storedToken = getStoredToken();
+        if (!storedToken) {
+          document.getElementById("loginOverlay").style.display = "flex";
+          document.getElementById("loginBtn").addEventListener("click", startLogin);
+          return; // Stop here — user must log in
         }
 
-        // --- Authentication ---
-        Cesium.ITwinPlatform.defaultShareKey =
-          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpVHdpbklkIjoiNjZhMmQzNTQtM2E5NS00ZGI5LThmMGQtYzZiNWM0Yzg2YzY0IiwiaWQiOiI4OWUyNDQyYS1jNTc1LTRlNzktODE0Ni02MjVmNGE5NzAwYzUiLCJleHAiOjE3ODQyMjUxMzR9.n8FvZfavpB-7sBlfQ_D3Z3Mj48I69tIFq2S2iUjezYo";
+        // Authenticated — hide overlay, set platform token
+        document.getElementById("loginOverlay").style.display = "none";
+        Cesium.ITwinPlatform.defaultAccessToken = storedToken.access_token;
 
-        const iTwinId = "66a2d354-3a95-4db9-8f0d-c6b5c4c86c64";
+        let selectedITwinId;
 
         const statusPanel = document.getElementById("statusPanel");
         function log(msg) {
@@ -256,20 +255,61 @@
           }
         }
 
-        // --- Step 1: List all reality data ---
-        log("Listing reality data...");
-        let allData;
-        try {
-          allData = await Cesium.ITwinPlatform.listRealityData(iTwinId);
-          log(`Found ${allData.length} reality data items:`);
-          for (const rd of allData) {
-            log(`  [${rd.type}] ${rd.displayName} (${rd.id})`);
-          }
-        } catch (e) {
-          log(`Error listing data: ${e.message}`);
-          return;
+        // --- Fetch iTwins and build dynamic dropdowns ---
+        const toolbar = document.getElementById("toolbar");
+
+        // Create native <select> elements for dynamic population
+        function createSelect(label) {
+          const container = document.createElement("span");
+          container.style.cssText = "margin-right: 8px;";
+          const lbl = document.createElement("label");
+          lbl.textContent = `${label}: `;
+          lbl.style.cssText = "color: #fff; font: 13px sans-serif;";
+          const sel = document.createElement("select");
+          sel.style.cssText = "font: 13px sans-serif; padding: 2px 4px;";
+          container.appendChild(lbl);
+          container.appendChild(sel);
+          toolbar.insertBefore(container, toolbar.firstChild);
+          return sel;
         }
 
+        const ccSelect = createSelect("CC Orientations");
+        const tilesetSelect = createSelect("3D Tiles");
+        const iTwinSelect = createSelect("iTwin");
+
+        // --- Fetch and populate iTwins ---
+        log("Fetching iTwins...");
+        try {
+          const resource = new Cesium.Resource({
+            url: `${Cesium.ITwinPlatform.apiEndpoint}itwins/recents`,
+            headers: {
+              Authorization: Cesium.ITwinPlatform._getAuthorizationHeader(),
+              Accept: "application/vnd.bentley.itwin-platform.v2+json",
+              Prefer: "return=representation",
+            },
+          });
+          resource.appendQueryParameters({ subClass: "Project", $top: "100" });
+          const resp = await resource.fetchJson();
+          const iTwins = resp.iTwins || [];
+          log(`Found ${iTwins.length} iTwins`);
+
+          const noneOpt = document.createElement("option");
+          noneOpt.value = "";
+          noneOpt.textContent = "(select an iTwin)";
+          iTwinSelect.appendChild(noneOpt);
+
+          for (const itwin of iTwins) {
+            const opt = document.createElement("option");
+            opt.value = itwin.id;
+            opt.textContent = itwin.displayName || itwin.number || itwin.id;
+            iTwinSelect.appendChild(opt);
+          }
+        } catch (e) {
+          log(`Error fetching iTwins: ${e.message}`);
+          console.error(e);
+        }
+
+        // --- On iTwin selection, load reality data ---
         const meshTypes = [
           "Cesium3DTiles",
           "RealityMesh3DTiles",
@@ -277,139 +317,193 @@
           "Terrain3DTiles",
           "GS_3DT",
         ];
-        const meshItems = allData.filter((rd) => meshTypes.includes(rd.type));
-        const ccItems = allData.filter((rd) => rd.type === "CCOrientations");
-        const imageItems = allData.filter((rd) => rd.type === "CCImageCollection");
+        let currentMeshItems = [];
+        let currentCCItems = [];
+        let currentImageItems = [];
 
-        // --- Step 2: Build 3D Tiles dropdown ---
-        const tilesetOptions = [{ text: "(none)", onselect: clearTileset }];
-        function makeTilesetHandler(item) {
-          return async function () {
-            clearTileset();
-            log(`Loading 3D Tiles: ${item.displayName}...`);
-            try {
-              currentTileset = await Cesium.ITwinData.createTilesetForRealityDataId({
-                iTwinId: iTwinId,
-                realityDataId: item.id,
-                type: item.type,
-                rootDocument: item.rootDocument,
-              });
-              scene.primitives.add(currentTileset);
-              log(`  ✓ Loaded ${item.displayName}`);
-              viewer.flyTo(currentTileset);
-            } catch (e) {
-              log(`  ✗ Failed: ${e.message}`);
+        async function onITwinSelected(iTwinId) {
+          clearTileset();
+          clearCollection();
+          tilesetSelect.innerHTML = "";
+          ccSelect.innerHTML = "";
+          currentMeshItems = [];
+          currentCCItems = [];
+          currentImageItems = [];
+          selectedITwinId = iTwinId;
+
+          if (!iTwinId) {
+            return;
+          }
+
+          log(`Loading reality data for iTwin ${iTwinId}...`);
+          try {
+            const allData = await Cesium.ITwinPlatform.listRealityData(iTwinId);
+            log(`Found ${allData.length} reality data items`);
+
+            currentMeshItems = allData.filter((rd) => meshTypes.includes(rd.type));
+            currentCCItems = allData.filter((rd) => rd.type === "CCOrientations");
+            currentImageItems = allData.filter((rd) => rd.type === "CCImageCollection");
+
+            // Populate 3D Tiles dropdown
+            const tNone = document.createElement("option");
+            tNone.value = "";
+            tNone.textContent = "(none)";
+            tilesetSelect.appendChild(tNone);
+            for (const item of currentMeshItems) {
+              const opt = document.createElement("option");
+              opt.value = item.id;
+              opt.textContent = item.displayName;
+              tilesetSelect.appendChild(opt);
             }
-          };
-        }
-        for (const item of meshItems) {
-          tilesetOptions.push({
-            text: `${item.displayName}`,
-            onselect: makeTilesetHandler(item),
-          });
-        }
-        Sandcastle.addToolbarMenu(tilesetOptions, "toolbar");
 
-        // --- Step 3: Build CCOrientations dropdown ---
-        const ccOptions = [{ text: "(no orientations)", onselect: clearCollection }];
-        function makeCCHandler(ccItem) {
-          return async function () {
-            clearCollection();
-            log(`Loading CCOrientations: ${ccItem.displayName}...`);
-            try {
-              currentCollection =
-                await Cesium.ITwinData.createProjectedImageCollectionForRealityDataId({
-                  iTwinId: iTwinId,
-                  realityDataId: ccItem.id,
-                  imageRealityDataId:
-                    imageItems.length > 0 ? imageItems[0].id : undefined,
-                  iiifBaseUrl: iiifAuthHeader ? IIIF_BASE_URL : undefined,
-                  iiifAuthHeader: iiifAuthHeader,
-                  defaultPlaneDistance: 10.0,
-                  showFrustums: true,
-                  showCameraIcons: true,
-                  showLabels: true,
-                  alpha: 1.0,
-                  frustumColor: Cesium.Color.WHITE,
-                });
-              scene.primitives.add(currentCollection);
-              log(`  ✓ Loaded ${currentCollection.length} projected images`);
-
-              // Handler
-              currentHandler = new Cesium.ProjectedImageCollectionHandler(
-                currentCollection,
-                scene,
-                {
-                  enabled: autoSelectEnabled,
-                  weights: { alignment: 0.7, distance: 0.3 },
-                  hysteresis: 0.05,
-                  threshold: 0.05,
-                },
-              );
-
-              // Status HUD
-              let previousBestItem;
-              preRenderListener = scene.preRender.addEventListener(function () {
-                if (!Cesium.defined(currentHandler)) {
-                  return;
-                }
-                const best = currentHandler.currentBestItem;
-
-                // Hide frustum for active image so it doesn't bleed through
-                if (best !== previousBestItem) {
-                  if (
-                    Cesium.defined(previousBestItem) &&
-                    Cesium.defined(previousBestItem.frustumPrimitive)
-                  ) {
-                    previousBestItem.frustumPrimitive.show =
-                      currentCollection.showFrustums;
-                  }
-                  if (Cesium.defined(best) && Cesium.defined(best.frustumPrimitive)) {
-                    best.frustumPrimitive.show = false;
-                  }
-                  previousBestItem = best;
-                }
-
-                if (best) {
-                  const score = Cesium.ProjectedImageCollection.computeViewScore(
-                    best,
-                    scene.camera,
-                    currentHandler.weights,
-                  ).toFixed(3);
-                  const iiif = best.primitive._iiifImageSource;
-                  const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
-                  statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
-
-                  // Snap camera to best image location when enabled
-                  if (snapToImageEnabled && best !== lastSnappedItem) {
-                    lastSnappedItem = best;
-                    viewer.camera.setView({
-                      destination: best.cameraPosition,
-                      orientation: {
-                        direction: best.cameraDirection,
-                        up: best.cameraUp,
-                      },
-                    });
-                  }
-                } else if (orbitActive) {
-                  statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
-                } else {
-                  statusPanel.textContent = "Active: none";
-                }
-              });
-            } catch (e) {
-              log(`  ✗ CCOrientations failed: ${e.message}`);
-              console.error(e);
+            // Populate CC Orientations dropdown
+            const cNone = document.createElement("option");
+            cNone.value = "";
+            cNone.textContent = "(no orientations)";
+            ccSelect.appendChild(cNone);
+            for (const item of currentCCItems) {
+              const opt = document.createElement("option");
+              opt.value = item.id;
+              opt.textContent = item.displayName;
+              ccSelect.appendChild(opt);
             }
-          };
+
+            log(
+              `  ${currentMeshItems.length} mesh, ${currentCCItems.length} CC, ${currentImageItems.length} image collections`,
+            );
+          } catch (e) {
+            log(`Error listing reality data: ${e.message}`);
+            console.error(e);
+          }
         }
-        for (const ccItem of ccItems) {
-          ccOptions.push({
-            text: `${ccItem.displayName}`,
-            onselect: makeCCHandler(ccItem),
-          });
-        }
-        Sandcastle.addToolbarMenu(ccOptions, "toolbar");
+
+        iTwinSelect.addEventListener("change", function () {
+          onITwinSelected(this.value);
+        });
+
+        // --- On 3D Tiles selection ---
+        tilesetSelect.addEventListener("change", async function () {
+          clearTileset();
+          const itemId = this.value;
+          if (!itemId || !selectedITwinId) {
+            return;
+          }
+          const item = currentMeshItems.find((m) => m.id === itemId);
+          if (!item) {
+            return;
+          }
+
+          log(`Loading 3D Tiles: ${item.displayName}...`);
+          try {
+            currentTileset = await Cesium.ITwinData.createTilesetForRealityDataId({
+              iTwinId: selectedITwinId,
+              realityDataId: item.id,
+              type: item.type,
+              rootDocument: item.rootDocument,
+            });
+            scene.primitives.add(currentTileset);
+            log(`  ✓ Loaded ${item.displayName}`);
+            viewer.flyTo(currentTileset);
+          } catch (e) {
+            log(`  ✗ Failed: ${e.message}`);
+          }
+        });
+
+        // --- On CC Orientations selection ---
+        let previousBestItem;
+
+        ccSelect.addEventListener("change", async function () {
+          clearCollection();
+          const itemId = this.value;
+          if (!itemId || !selectedITwinId) {
+            return;
+          }
+          const ccItem = currentCCItems.find((c) => c.id === itemId);
+          if (!ccItem) {
+            return;
+          }
+
+          log(`Loading CCOrientations: ${ccItem.displayName}...`);
+          try {
+            currentCollection =
+              await Cesium.ITwinData.createProjectedImageCollectionForRealityDataId({
+                iTwinId: selectedITwinId,
+                realityDataId: ccItem.id,
+                imageRealityDataId:
+                  currentImageItems.length > 0 ? currentImageItems[0].id : undefined,
+                iiifBaseUrl: IIIF_BASE_URL,
+                defaultPlaneDistance: 10.0,
+                showFrustums: true,
+                showCameraIcons: true,
+                showLabels: true,
+                alpha: 1.0,
+                frustumColor: Cesium.Color.WHITE,
+              });
+            scene.primitives.add(currentCollection);
+            log(`  ✓ Loaded ${currentCollection.length} projected images`);
+
+            currentHandler = new Cesium.ProjectedImageCollectionHandler(
+              currentCollection,
+              scene,
+              {
+                enabled: autoSelectEnabled,
+                weights: { alignment: 0.7, distance: 0.3 },
+                hysteresis: 0.05,
+                threshold: 0.05,
+              },
+            );
+
+            previousBestItem = undefined;
+            preRenderListener = scene.preRender.addEventListener(function () {
+              if (!Cesium.defined(currentHandler)) {
+                return;
+              }
+              const best = currentHandler.currentBestItem;
+
+              if (best !== previousBestItem) {
+                if (
+                  Cesium.defined(previousBestItem) &&
+                  Cesium.defined(previousBestItem.frustumPrimitive)
+                ) {
+                  previousBestItem.frustumPrimitive.show = currentCollection.showFrustums;
+                }
+                if (Cesium.defined(best) && Cesium.defined(best.frustumPrimitive)) {
+                  best.frustumPrimitive.show = false;
+                }
+                previousBestItem = best;
+              }
+
+              if (best) {
+                const score = Cesium.ProjectedImageCollection.computeViewScore(
+                  best,
+                  scene.camera,
+                  currentHandler.weights,
+                ).toFixed(3);
+                const iiif = best.primitive._iiifImageSource;
+                const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
+                statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
+
+                if (snapToImageEnabled && best !== lastSnappedItem) {
+                  lastSnappedItem = best;
+                  viewer.camera.setView({
+                    destination: best.cameraPosition,
+                    orientation: {
+                      direction: best.cameraDirection,
+                      up: best.cameraUp,
+                    },
+                  });
+                }
+              } else if (orbitActive) {
+                statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
+              } else {
+                statusPanel.textContent = "Active: none";
+              }
+            });
+          } catch (e) {
+            log(`  ✗ CCOrientations failed: ${e.message}`);
+            console.error(e);
+          }
+        });
 
         // --- Toggles ---
         let autoSelectEnabled = true;

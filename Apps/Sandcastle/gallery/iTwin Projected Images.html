@@ -383,13 +383,12 @@
                   // Snap camera to best image location when enabled
                   if (snapToImageEnabled && best !== lastSnappedItem) {
                     lastSnappedItem = best;
-                    viewer.camera.flyTo({
+                    viewer.camera.setView({
                       destination: best.cameraPosition,
                       orientation: {
                         direction: best.cameraDirection,
                         up: best.cameraUp,
                       },
-                      duration: 0.5,
                     });
                   }
                 } else if (orbitActive) {

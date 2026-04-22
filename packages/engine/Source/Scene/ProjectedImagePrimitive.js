@@ -138,6 +138,8 @@ function ProjectedImagePrimitive(options) {
   this._primitive = undefined;
   this._needsUpdate = true;
   this._boundingSphere = undefined;
+  this._vertexPositions = undefined;
+  this._vertexUVs = undefined;
 
   // IIIF LOD management (optional — only set when using IIIF tile server)
   this._iiifImageSource = options.iiifImageSource;
@@ -602,6 +604,8 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
 
     const geometry = buildProjectionGeometry(this);
     this._boundingSphere = geometry.boundingSphere;
+    this._vertexPositions = geometry.attributes.position.values;
+    this._vertexUVs = geometry.attributes.st.values;
 
     const instance = new GeometryInstance({
       geometry: geometry,
@@ -616,10 +620,11 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
     );
 
     const appearance = new MaterialAppearance({
-      material: Material.fromType("Image", {
+      material: Material.fromType("ProjectedImage", {
         image: this._image,
-        repeat: new Cartesian2(1.0, 1.0),
         color: tintColor,
+        uvOffset: new Cartesian2(0.0, 0.0),
+        uvScale: new Cartesian2(1.0, 1.0),
       }),
       faceForward: true,
       flat: true, // no lighting — show original image colors
@@ -646,6 +651,7 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
   // LOD management for IIIF images
   if (defined(this._iiifImageSource) && defined(this._boundingSphere)) {
     const iiif = this._iiifImageSource;
+    const uniforms = this._primitive.appearance.material.uniforms;
 
     if (!iiif._maxTextureSizeSet) {
       iiif.setMaxTextureSize(ContextLimits.maximumTextureSize);
@@ -656,12 +662,44 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
       this._boundingSphere,
     );
 
+    const maxSrc = iiif._maxSourceDimension;
     const desiredLevel = iiif.computeDesiredLodLevel(screenPixels);
 
-    if (desiredLevel !== iiif._currentLodLevel && isFinite(desiredLevel)) {
-      iiif._currentLodLevel = desiredLevel;
-      const resource = iiif.getLodResource(desiredLevel);
-      this._primitive.appearance.material.uniforms.image = resource;
+    if (iiif._fullImageLoaded || screenPixels <= maxSrc) {
+      // Whole-image mode: use standard LOD levels
+      if (iiif._regionMode) {
+        // Switching back from region mode — reset UV transform
+        iiif._regionMode = false;
+        uniforms.uvOffset.x = 0.0;
+        uniforms.uvOffset.y = 0.0;
+        uniforms.uvScale.x = 1.0;
+        uniforms.uvScale.y = 1.0;
+      }
+
+      if (desiredLevel !== iiif._currentLodLevel && isFinite(desiredLevel)) {
+        iiif._currentLodLevel = desiredLevel;
+        uniforms.image = iiif.getLodResource(desiredLevel);
+      }
+    } else if (defined(this._vertexPositions) && defined(this._vertexUVs)) {
+      // Region mode: zoomed past full-res, full image not loaded
+      const visibleRegion = iiif.computeVisibleRegion(
+        frameState,
+        this._vertexPositions,
+        this._vertexUVs,
+      );
+
+      if (defined(visibleRegion) && iiif.needsRegionUpdate(visibleRegion)) {
+        uniforms.image = iiif.getRegionResource(
+          visibleRegion.x,
+          visibleRegion.y,
+          visibleRegion.w,
+          visibleRegion.h,
+        );
+        uniforms.uvOffset.x = visibleRegion.uvOffset.x;
+        uniforms.uvOffset.y = visibleRegion.uvOffset.y;
+        uniforms.uvScale.x = visibleRegion.uvScale.x;
+        uniforms.uvScale.y = visibleRegion.uvScale.y;
+      }
     }
   }
 

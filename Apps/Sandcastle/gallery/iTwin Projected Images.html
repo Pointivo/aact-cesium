@@ -330,7 +330,7 @@
                   showCameraIcons: true,
                   showLabels: true,
                   alpha: 1.0,
-                  frustumColor: Cesium.Color.CYAN.withAlpha(0.3),
+                  frustumColor: Cesium.Color.WHITE,
                 });
               scene.primitives.add(currentCollection);
               log(`  ✓ Loaded ${currentCollection.length} projected images`);
@@ -348,11 +348,28 @@
               );
 
               // Status HUD
+              let previousBestItem;
               preRenderListener = scene.preRender.addEventListener(function () {
                 if (!Cesium.defined(currentHandler)) {
                   return;
                 }
                 const best = currentHandler.currentBestItem;
+
+                // Hide frustum for active image so it doesn't bleed through
+                if (best !== previousBestItem) {
+                  if (
+                    Cesium.defined(previousBestItem) &&
+                    Cesium.defined(previousBestItem.frustumPrimitive)
+                  ) {
+                    previousBestItem.frustumPrimitive.show =
+                      currentCollection.showFrustums;
+                  }
+                  if (Cesium.defined(best) && Cesium.defined(best.frustumPrimitive)) {
+                    best.frustumPrimitive.show = false;
+                  }
+                  previousBestItem = best;
+                }
+
                 if (best) {
                   const score = Cesium.ProjectedImageCollection.computeViewScore(
                     best,
@@ -362,6 +379,19 @@
                   const iiif = best.primitive._iiifImageSource;
                   const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
                   statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
+
+                  // Snap camera to best image location when enabled
+                  if (snapToImageEnabled && best !== lastSnappedItem) {
+                    lastSnappedItem = best;
+                    viewer.camera.flyTo({
+                      destination: best.cameraPosition,
+                      orientation: {
+                        direction: best.cameraDirection,
+                        up: best.cameraUp,
+                      },
+                      duration: 0.5,
+                    });
+                  }
                 } else if (orbitActive) {
                   statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
                 } else {
@@ -384,6 +414,9 @@
 
         // --- Toggles ---
         let autoSelectEnabled = true;
+        let snapToImageEnabled = false;
+        let lastSnappedItem;
+
         Sandcastle.addToggleButton("Auto-select best view", true, function (checked) {
           autoSelectEnabled = checked;
           if (Cesium.defined(currentHandler)) {
@@ -393,6 +426,13 @@
                 currentCollection.setItemShow(currentCollection.get(i), true);
               }
             }
+          }
+        });
+
+        Sandcastle.addToggleButton("Snap to images", false, function (checked) {
+          snapToImageEnabled = checked;
+          if (!checked) {
+            lastSnappedItem = undefined;
           }
         });
 

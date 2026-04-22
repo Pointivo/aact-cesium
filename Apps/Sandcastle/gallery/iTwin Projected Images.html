@@ -202,6 +202,12 @@
 
         const storedToken = getStoredToken();
         if (!storedToken) {
+          // Hide Sandcastle loading overlay so login is clickable
+          document.body.classList.remove("sandcastle-loading");
+          const loadingOverlay = document.getElementById("loadingOverlay");
+          if (loadingOverlay) {
+            loadingOverlay.style.display = "none";
+          }
           document.getElementById("loginOverlay").style.display = "flex";
           document.getElementById("loginBtn").addEventListener("click", startLogin);
           return; // Stop here — user must log in

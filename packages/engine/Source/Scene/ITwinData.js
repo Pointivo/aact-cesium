@@ -297,6 +297,11 @@ ITwinData.loadGeospatialFeatures = async function ({
  * @param {string} options.realityDataId The id of the CCOrientations reality data
  * @param {string} [options.imageRealityDataId] The id of the CCImageCollection reality data.
  *   If not provided, the function will search for a CCImageCollection in the same iTwin.
+ * @param {string} [options.iiifBaseUrl] Base URL of the IIIF tile server (e.g. "https://iiif.example.com").
+ *   When provided, images are loaded via IIIF with progressive LOD instead of Azure blob storage.
+ * @param {string} [options.iiifAuthHeader] Authorization header for IIIF requests (e.g. "Bearer ...").
+ *   Required when using IIIF with share key auth (share keys don't work with IIIF servers).
+ *   If not provided, uses the platform's default authorization header.
  * @param {number} [options.defaultPlaneDistance=50.0] Default projection plane distance.
  * @param {boolean} [options.showFrustums=true] Show frustum wireframes.
  * @param {boolean} [options.showCameraIcons=true] Show camera icons.
@@ -311,6 +316,8 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
   iTwinId,
   realityDataId,
   imageRealityDataId,
+  iiifBaseUrl,
+  iiifAuthHeader,
   defaultPlaneDistance,
   showFrustums,
   showCameraIcons,
@@ -386,79 +393,123 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
     }
   }
 
-  // 2. Resolve the image container URL
+  // 2. Resolve the image container URL (skip when using IIIF tile server)
   let imageContainerUrl;
 
-  if (defined(imageRealityDataId)) {
-    imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
-      iTwinId,
-      imageRealityDataId,
-    );
-  } else {
-    // Search for a CCImageCollection in the same iTwin
-    const allData = await ITwinPlatform.listRealityData(iTwinId, {
-      types: [ITwinPlatform.RealityDataType.CCImageCollection],
-    });
-
-    if (allData.length === 0) {
-      // Fall back: try resolving images from the same container as orientations
+  if (!defined(iiifBaseUrl)) {
+    if (defined(imageRealityDataId)) {
       imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
         iTwinId,
-        realityDataId,
+        imageRealityDataId,
       );
     } else {
-      // Use the first CCImageCollection found
-      imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
-        iTwinId,
-        allData[0].id,
-      );
+      // Search for a CCImageCollection in the same iTwin
+      const allData = await ITwinPlatform.listRealityData(iTwinId, {
+        types: [ITwinPlatform.RealityDataType.CCImageCollection],
+      });
+
+      if (allData.length === 0) {
+        // Fall back: try resolving images from the same container as orientations
+        imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+          iTwinId,
+          realityDataId,
+        );
+      } else {
+        // Use the first CCImageCollection found
+        imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+          iTwinId,
+          allData[0].id,
+        );
+      }
     }
   }
 
   // 3. Build the image URL resolver
-  // The ccOrientations XML contains relative image paths;
-  // we resolve them against the image container URL
-  const containerUrlObj = new URL(imageContainerUrl);
-  const containerBase = `${containerUrlObj.origin}${containerUrlObj.pathname}`;
-  const containerSearch = containerUrlObj.search; // SAS token
+  let resolveImageUrl;
+  let iiifOptions;
 
-  // Extract the container name (last path segment, typically a GUID)
-  const pathSegments = containerUrlObj.pathname.split("/").filter((s) => s);
-  const containerName = pathSegments[pathSegments.length - 1];
+  if (defined(iiifBaseUrl)) {
+    // IIIF mode: resolve images through the tile server
+    const authHeader =
+      iiifAuthHeader || ITwinPlatform._getAuthorizationHeader();
+    const trimmedBase = iiifBaseUrl.replace(/\/+$/, "");
 
-  const resolveImageUrl = function (imagePath) {
-    // imagePath may have backslashes from Windows paths in the XML
-    let normalized = imagePath.replace(/\\/g, "/");
+    resolveImageUrl = function (imagePath) {
+      const normalized = imagePath.replace(/\\/g, "/");
+      const stem = normalized
+        .split("/")
+        .pop()
+        .replace(/\.[^.]+$/, "");
+      const iiifImageBase = `${trimmedBase}/${iTwinId}/${stem}`;
+      // Start with smallest thumbnail — LOD management will upgrade as needed
+      return new Resource({
+        url: `${iiifImageBase}/full/256,/0/default.jpg`,
+        headers: { Authorization: authHeader },
+      });
+    };
 
-    // Strip leading container name if the ImagePath redundantly includes it
-    // e.g. "753c3ff9-.../image.jpg" → "image.jpg"
-    if (normalized.startsWith(`${containerName}/`)) {
-      normalized = normalized.substring(containerName.length + 1);
-    }
+    iiifOptions = {
+      iiifBaseUrl: trimmedBase,
+      iTwinId: iTwinId,
+      authHeader: authHeader,
+    };
 
-    const url = `${containerBase}/${normalized}${containerSearch}`;
-    return url;
-  };
+    console.log("IIIF tile server:", trimmedBase);
+    console.log(
+      "Sample IIIF URL:",
+      `${trimmedBase}/${iTwinId}/sample/full/1024,/0/default.jpg`,
+    );
+  } else {
+    // Azure blob mode: resolve against the image container URL
+    const containerUrlObj = new URL(imageContainerUrl);
+    const containerBase = `${containerUrlObj.origin}${containerUrlObj.pathname}`;
+    const containerSearch = containerUrlObj.search; // SAS token
 
-  // Log the container and a sample URL for debugging
-  console.log("Image container base:", containerBase);
-  console.log(
-    "Sample image URL will look like:",
-    resolveImageUrl("sample/image.jpg"),
-  );
+    // Extract the container name (last path segment, typically a GUID)
+    const pathSegments = containerUrlObj.pathname.split("/").filter((s) => s);
+    const containerName = pathSegments[pathSegments.length - 1];
+
+    resolveImageUrl = function (imagePath) {
+      // imagePath may have backslashes from Windows paths in the XML
+      let normalized = imagePath.replace(/\\/g, "/");
+
+      // Strip leading container name if the ImagePath redundantly includes it
+      if (normalized.startsWith(`${containerName}/`)) {
+        normalized = normalized.substring(containerName.length + 1);
+      }
+
+      const url = `${containerBase}/${normalized}${containerSearch}`;
+      return url;
+    };
+
+    console.log("Image container base:", containerBase);
+    console.log(
+      "Sample image URL will look like:",
+      resolveImageUrl("sample/image.jpg"),
+    );
+  }
 
   // 4. Fetch and parse the ccOrientations XML
+  const collectionOptions = {
+    resolveImageUrl: resolveImageUrl,
+    defaultPlaneDistance: defaultPlaneDistance ?? 50.0,
+    showFrustums: showFrustums,
+    showCameraIcons: showCameraIcons,
+    showLabels: showLabels,
+    alpha: alpha,
+    frustumColor: frustumColor,
+  };
+
+  // Pass IIIF config so the collection can create IIIFImageSources per image
+  if (defined(iiifOptions)) {
+    collectionOptions.iiifBaseUrl = iiifOptions.iiifBaseUrl;
+    collectionOptions.iTwinId = iiifOptions.iTwinId;
+    collectionOptions.authHeader = iiifOptions.authHeader;
+  }
+
   const collection = await ProjectedImageCollection.fromCCOrientationsUrl(
     orientationsUrl,
-    {
-      resolveImageUrl: resolveImageUrl,
-      defaultPlaneDistance: defaultPlaneDistance ?? 50.0,
-      showFrustums: showFrustums,
-      showCameraIcons: showCameraIcons,
-      showLabels: showLabels,
-      alpha: alpha,
-      frustumColor: frustumColor,
-    },
+    collectionOptions,
   );
 
   return collection;

@@ -8,6 +8,7 @@ import defined from "../Core/defined.js";
 import destroyObject from "../Core/destroyObject.js";
 import Frozen from "../Core/Frozen.js";
 import HorizontalOrigin from "./HorizontalOrigin.js";
+import IIIFImageSource from "./IIIFImageSource.js";
 import LabelCollection from "./LabelCollection.js";
 import LabelStyle from "./LabelStyle.js";
 import Matrix3 from "../Core/Matrix3.js";
@@ -532,6 +533,22 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
         const planeDistance =
           options.defaultPlaneDistance ?? collection._defaultPlaneDistance;
 
+        // Create IIIFImageSource when in IIIF mode
+        let iiifImageSource;
+        if (defined(options.iiifBaseUrl)) {
+          const normalized = imagePath.replace(/\\/g, "/");
+          const stem = normalized
+            .split("/")
+            .pop()
+            .replace(/\.[^.]+$/, "");
+          iiifImageSource = new IIIFImageSource({
+            iiifImageBase: `${options.iiifBaseUrl}/${options.iTwinId}/${stem}`,
+            imageWidth: pgParams.imageWidth,
+            imageHeight: pgParams.imageHeight,
+            authHeader: options.authHeader,
+          });
+        }
+
         collection.add({
           cameraPosition: cameraPosition,
           cameraRotation: cameraToWorld,
@@ -546,6 +563,7 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
           projectionType: pgParams.projectionType,
           planeDistance: planeDistance,
           alpha: options.alpha ?? 1.0,
+          iiifImageSource: iiifImageSource,
           name: `Photo ${photoId}`,
           id: `photo-${photoId}`,
         });

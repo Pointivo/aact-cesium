@@ -43,10 +43,170 @@
     <div id="loadingOverlay"><h1>Loading...</h1></div>
     <div id="toolbar"></div>
     <div id="statusPanel">Initializing...</div>
+    <div
+      id="iiifLoginOverlay"
+      style="display: none; position: absolute; top: 10px; right: 10px; z-index: 200"
+    >
+      <button
+        id="iiifLoginBtn"
+        style="
+          font: 13px sans-serif;
+          padding: 8px 16px;
+          cursor: pointer;
+          background: #4a90d9;
+          color: #fff;
+          border: none;
+          border-radius: 6px;
+        "
+      >
+        Login for IIIF Images
+      </button>
+      <span
+        id="iiifLoginStatus"
+        style="color: #fff; font: 12px monospace; margin-left: 8px"
+      ></span>
+    </div>
     <script id="cesium_sandcastle_script">
       window.startup = async function (Cesium) {
         "use strict";
         //Sandcastle_Begin
+
+        // --- IIIF Tile Server Config ---
+        const IIIF_BASE_URL = "https://iiif.aact-platform-dev.pointivo.com";
+
+        // --- OAuth2 PKCE for IIIF image auth ---
+        const IMS_AUTHORITY = "https://ims.bentley.com";
+        const AUTHORIZE_URL = `${IMS_AUTHORITY}/connect/authorize`;
+        const TOKEN_URL = `${IMS_AUTHORITY}/connect/token`;
+        const IIIF_CLIENT_ID = "spa-kq3hJXgDnc7C86yCjeMV3CA38";
+        const IIIF_SCOPES = "itwin-platform";
+        const IIIF_REDIRECT_URI = window.location.origin + window.location.pathname;
+
+        function generateCodeVerifier() {
+          const array = new Uint8Array(64);
+          crypto.getRandomValues(array);
+          return btoa(String.fromCharCode(...array))
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_")
+            .replace(/=/g, "");
+        }
+
+        async function generateCodeChallenge(verifier) {
+          const data = new TextEncoder().encode(verifier);
+          const hash = await crypto.subtle.digest("SHA-256", data);
+          return btoa(String.fromCharCode(...new Uint8Array(hash)))
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_")
+            .replace(/=/g, "");
+        }
+
+        function getStoredIiifToken() {
+          try {
+            const data = JSON.parse(sessionStorage.getItem("iiif_token"));
+            if (data && data.access_token && data.expires_at > Date.now() / 1000) {
+              return data;
+            }
+          } catch {
+            // ignore
+          }
+          return null;
+        }
+
+        async function iiifAuthenticate() {
+          const codeVerifier = generateCodeVerifier();
+          const codeChallenge = await generateCodeChallenge(codeVerifier);
+          const state = generateCodeVerifier().substring(0, 32);
+
+          sessionStorage.setItem("iiif_pkce_verifier", codeVerifier);
+          sessionStorage.setItem("iiif_pkce_state", state);
+
+          const params = new URLSearchParams({
+            client_id: IIIF_CLIENT_ID,
+            response_type: "code",
+            redirect_uri: IIIF_REDIRECT_URI,
+            scope: IIIF_SCOPES,
+            state: state,
+            code_challenge: codeChallenge,
+            code_challenge_method: "S256",
+            response_mode: "query",
+          });
+
+          window.location.href = `${AUTHORIZE_URL}?${params.toString()}`;
+        }
+
+        async function handleIiifAuthCallback() {
+          const params = new URLSearchParams(window.location.search);
+          const code = params.get("code");
+          const state = params.get("state");
+
+          if (!code || !state) {
+            return false;
+          }
+
+          const savedState = sessionStorage.getItem("iiif_pkce_state");
+          const codeVerifier = sessionStorage.getItem("iiif_pkce_verifier");
+
+          if (state !== savedState || !codeVerifier) {
+            return false;
+          }
+
+          try {
+            const resp = await fetch(TOKEN_URL, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+              },
+              body: new URLSearchParams({
+                grant_type: "authorization_code",
+                client_id: IIIF_CLIENT_ID,
+                code: code,
+                redirect_uri: IIIF_REDIRECT_URI,
+                code_verifier: codeVerifier,
+              }),
+            });
+
+            if (!resp.ok) {
+              throw new Error(`Token exchange failed: ${resp.status}`);
+            }
+
+            const tokenData = await resp.json();
+            tokenData.expires_at = Date.now() / 1000 + (tokenData.expires_in || 3600);
+            sessionStorage.setItem("iiif_token", JSON.stringify(tokenData));
+
+            sessionStorage.removeItem("iiif_pkce_verifier");
+            sessionStorage.removeItem("iiif_pkce_state");
+
+            window.location.href = IIIF_REDIRECT_URI;
+            return true;
+          } catch (e) {
+            console.error("IIIF auth failed:", e);
+            return false;
+          }
+        }
+
+        // Handle OAuth callback if present
+        await handleIiifAuthCallback();
+
+        // Get IIIF token (may be null if not logged in yet)
+        const iiifToken = getStoredIiifToken();
+        const iiifAuthHeader = iiifToken ? `Bearer ${iiifToken.access_token}` : undefined;
+
+        // Show login button if not authenticated for IIIF
+        const iiifLoginOverlay = document.getElementById("iiifLoginOverlay");
+        const iiifLoginBtn = document.getElementById("iiifLoginBtn");
+        const iiifLoginStatus = document.getElementById("iiifLoginStatus");
+
+        if (!iiifToken) {
+          iiifLoginOverlay.style.display = "block";
+          iiifLoginStatus.textContent = "Not logged in — images via Azure";
+          iiifLoginBtn.addEventListener("click", function () {
+            iiifAuthenticate();
+          });
+        } else {
+          iiifLoginOverlay.style.display = "block";
+          iiifLoginStatus.textContent = "✓ IIIF authenticated";
+          iiifLoginBtn.style.display = "none";
+        }
 
         // --- Authentication ---
         Cesium.ITwinPlatform.defaultShareKey =
@@ -163,6 +323,8 @@
                   realityDataId: ccItem.id,
                   imageRealityDataId:
                     imageItems.length > 0 ? imageItems[0].id : undefined,
+                  iiifBaseUrl: iiifAuthHeader ? IIIF_BASE_URL : undefined,
+                  iiifAuthHeader: iiifAuthHeader,
                   defaultPlaneDistance: 10.0,
                   showFrustums: true,
                   showCameraIcons: true,

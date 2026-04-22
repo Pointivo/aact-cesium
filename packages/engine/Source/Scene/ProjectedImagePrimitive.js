@@ -13,6 +13,7 @@ import GeometryAttributes from "../Core/GeometryAttributes.js";
 import GeometryInstance from "../Core/GeometryInstance.js";
 import Matrix3 from "../Core/Matrix3.js";
 import PrimitiveType from "../Core/PrimitiveType.js";
+import IIIFImageSource from "./IIIFImageSource.js";
 import Material from "./Material.js";
 import MaterialAppearance from "./MaterialAppearance.js";
 import Primitive from "./Primitive.js";
@@ -135,6 +136,10 @@ function ProjectedImagePrimitive(options) {
   // Internal state
   this._primitive = undefined;
   this._needsUpdate = true;
+  this._boundingSphere = undefined;
+
+  // IIIF LOD management (optional — only set when using IIIF tile server)
+  this._iiifImageSource = options.iiifImageSource;
 }
 
 Object.defineProperties(ProjectedImagePrimitive.prototype, {
@@ -595,6 +600,7 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
     }
 
     const geometry = buildProjectionGeometry(this);
+    this._boundingSphere = geometry.boundingSphere;
 
     const instance = new GeometryInstance({
       geometry: geometry,
@@ -634,6 +640,28 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
     });
 
     this._needsUpdate = false;
+  }
+
+  // LOD management for IIIF images
+  if (defined(this._iiifImageSource) && defined(this._boundingSphere)) {
+    const iiif = this._iiifImageSource;
+
+    if (!iiif._maxTextureSizeSet) {
+      iiif.setMaxTextureSize(frameState.context.maximumTextureSize);
+    }
+
+    const screenPixels = IIIFImageSource.computeScreenPixels(
+      frameState,
+      this._boundingSphere,
+    );
+
+    const desiredLevel = iiif.computeDesiredLodLevel(screenPixels);
+
+    if (desiredLevel !== iiif._currentLodLevel && isFinite(desiredLevel)) {
+      iiif._currentLodLevel = desiredLevel;
+      const resource = iiif.getLodResource(desiredLevel);
+      this._primitive.appearance.material.uniforms.image = resource;
+    }
   }
 
   this._primitive.update(frameState);

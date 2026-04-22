@@ -199,6 +199,7 @@ ProjectedImageCollection.prototype.add = function (options) {
     planeDistance: planeDistance,
     alpha: options.alpha,
     id: options.id,
+    iiifImageSource: options.iiifImageSource,
   });
   this._primitiveCollection.add(primitive);
 

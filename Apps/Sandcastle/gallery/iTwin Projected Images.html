@@ -330,7 +330,7 @@
                   showCameraIcons: true,
                   showLabels: true,
                   alpha: 1.0,
-                  frustumColor: Cesium.Color.WHITE,
+                  frustumColor: Cesium.Color.CYAN.withAlpha(0.3),
                 });
               scene.primitives.add(currentCollection);
               log(`  ✓ Loaded ${currentCollection.length} projected images`);
@@ -359,7 +359,9 @@
                     scene.camera,
                     currentHandler.weights,
                   ).toFixed(3);
-                  statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score})`;
+                  const iiif = best.primitive._iiifImageSource;
+                  const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
+                  statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
                 } else if (orbitActive) {
                   statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
                 } else {

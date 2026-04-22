@@ -462,6 +462,13 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlString, "application/xml");
 
+  // Log root element and structure for debugging
+  const rootTag = doc.documentElement ? doc.documentElement.tagName : "none";
+  console.log(`XML root element: <${rootTag}>`);
+  if (rootTag !== "BlocksExchange") {
+    console.log(`XML snippet: ${xmlString.substring(0, 500)}`);
+  }
+
   const collection = new ProjectedImageCollection({
     defaultPlaneDistance: options.defaultPlaneDistance ?? 50.0,
     showFrustums: options.showFrustums,
@@ -783,6 +790,239 @@ ProjectedImageCollection.fromCCOrientationsUrl = async function (url, options) {
   const resource = url instanceof Resource ? url : new Resource({ url: url });
   const xmlString = await resource.fetchText();
   return ProjectedImageCollection.fromCCOrientationsXml(xmlString, options);
+};
+
+// ---------------------------------------------------------------------------
+// ContextScene JSON parser
+// ---------------------------------------------------------------------------
+
+function opkToRotationMatrix(omega, phi, kappa) {
+  const co = Math.cos(omega);
+  const so = Math.sin(omega);
+  const cp = Math.cos(phi);
+  const sp = Math.sin(phi);
+  const ck = Math.cos(kappa);
+  const sk = Math.sin(kappa);
+
+  return new Matrix3(
+    cp * ck,
+    so * sp * ck - co * sk,
+    co * sp * ck + so * sk,
+    cp * sk,
+    so * sp * sk + co * ck,
+    co * sp * sk - so * ck,
+    -sp,
+    so * cp,
+    co * cp,
+  );
+}
+
+function parseContextSceneDevice(device) {
+  const dims = device.Dimensions || {};
+  const imageWidth = dims.Width || dims.width || 1;
+  const imageHeight = dims.Height || dims.height || 1;
+
+  const focalLengthPx = device.FocalLength || 1;
+
+  const pp = device.PrincipalPoint || {};
+  const principalPointX = pp.x ?? imageWidth / 2;
+  const principalPointY = pp.y ?? imageHeight / 2;
+
+  let distortion = [];
+  let projectionType = ProjectionType.PINHOLE;
+  const deviceType = (device.Type || "perspective").toLowerCase();
+
+  if (deviceType === "fisheye") {
+    projectionType = ProjectionType.FISHEYE;
+    const fd = device.FisheyeDistortion || {};
+    distortion = [fd.P0 || 0, fd.P1 || 0, fd.P2 || 0, fd.P3 || 0];
+  } else {
+    const rd = device.RadialDistortion || {};
+    const k1 = rd.k1 || 0;
+    const k2 = rd.k2 || 0;
+    const k3 = rd.k3 || 0;
+    const p1 = rd.p1 || 0;
+    const p2 = rd.p2 || 0;
+
+    if (k1 !== 0 || k2 !== 0 || k3 !== 0 || p1 !== 0 || p2 !== 0) {
+      if (p1 !== 0 || p2 !== 0 || k3 !== 0) {
+        projectionType = ProjectionType.BROWN_CONRADY;
+        distortion = [k1, k2, k3, p1, p2];
+      } else {
+        projectionType = ProjectionType.PERSPECTIVE_2;
+        distortion = [k1, k2];
+      }
+    }
+  }
+
+  return {
+    imageWidth,
+    imageHeight,
+    focalLengthPx,
+    principalPointX,
+    principalPointY,
+    distortion,
+    projectionType,
+  };
+}
+
+function isEcefSrs(def) {
+  return def === "EPSG:4978";
+}
+
+function isGeographicSrs(def) {
+  const d = (def || "").toUpperCase();
+  return d === "WGS84" || d === "EPSG:4326";
+}
+
+function contextSceneCenterToCartesian3(center, srsDef) {
+  if (isEcefSrs(srsDef)) {
+    return new Cartesian3(center.x, center.y, center.z);
+  }
+  if (isGeographicSrs(srsDef)) {
+    return Cartesian3.fromDegrees(center.x, center.y, center.z || 0);
+  }
+  console.warn(`ContextScene SRS "${srsDef}" not recognized, treating as ECEF`);
+  return new Cartesian3(center.x, center.y, center.z);
+}
+
+/**
+ * Create a ProjectedImageCollection from a ContextScene JSON object.
+ *
+ * @param {object} sceneData Parsed ContextScene JSON.
+ * @param {object} options Same options as fromCCOrientationsXml.
+ * @returns {Promise<ProjectedImageCollection>}
+ */
+ProjectedImageCollection.fromContextSceneJson = async function (
+  sceneData,
+  options,
+) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.object("sceneData", sceneData);
+  Check.typeOf.object("options", options);
+  Check.typeOf.func("options.resolveImageUrl", options.resolveImageUrl);
+  //>>includeEnd('debug');
+
+  const collection = new ProjectedImageCollection({
+    defaultPlaneDistance: options.defaultPlaneDistance ?? 50.0,
+    showFrustums: options.showFrustums,
+    showCameraIcons: options.showCameraIcons,
+    showLabels: options.showLabels,
+    frustumColor: options.frustumColor,
+  });
+
+  const pc = sceneData.PhotoCollection;
+  if (!defined(pc)) {
+    return collection;
+  }
+
+  const srsMap = sceneData.SpatialReferenceSystems || {};
+  const pcSrsId = String(pc.SRSId ?? "0");
+  const srsDef = srsMap[pcSrsId]?.Definition || "EPSG:4978";
+
+  const devices = {};
+  const rawDevices = pc.Devices || {};
+  for (const [id, dev] of Object.entries(rawDevices)) {
+    devices[id] = parseContextSceneDevice(dev);
+  }
+
+  const poses = pc.Poses || {};
+  const photos = pc.Photos || {};
+
+  for (const [photoId, photo] of Object.entries(photos)) {
+    const deviceId = String(photo.DeviceId ?? "");
+    const poseId = String(photo.PoseId ?? "");
+
+    const device = devices[deviceId];
+    const pose = poses[poseId];
+
+    if (!defined(device) || !defined(pose) || !defined(pose.Center)) {
+      continue;
+    }
+
+    const rot = pose.Rotation;
+    if (!defined(rot)) {
+      continue;
+    }
+
+    const cameraToWorld = opkToRotationMatrix(
+      rot.omega || 0,
+      rot.phi || 0,
+      rot.kappa || 0,
+    );
+
+    adjustRotationForCameraOrientation(cameraToWorld, "XRightYDown");
+
+    const cameraPosition = contextSceneCenterToCartesian3(pose.Center, srsDef);
+
+    const imagePath = photo.ImagePath || "";
+    const colonIdx = imagePath.indexOf(":");
+    const cleanPath =
+      colonIdx >= 0 ? imagePath.substring(colonIdx + 1) : imagePath;
+
+    let imageUrl;
+    try {
+      imageUrl = await options.resolveImageUrl(cleanPath);
+    } catch {
+      continue;
+    }
+
+    let iiifImageSource;
+    if (defined(options.iiifBaseUrl)) {
+      const stem = cleanPath.replace(/\.[^.]+$/, "");
+      iiifImageSource = new IIIFImageSource({
+        iiifImageBase: `${options.iiifBaseUrl}/${options.iTwinId}/${stem}`,
+        imageWidth: device.imageWidth,
+        imageHeight: device.imageHeight,
+        authHeader: options.authHeader,
+      });
+    }
+
+    const planeDistance =
+      photo.MedianDepth ||
+      options.defaultPlaneDistance ||
+      collection._defaultPlaneDistance;
+
+    collection.add({
+      cameraPosition: cameraPosition,
+      cameraRotation: cameraToWorld,
+      image: imageUrl,
+      imageWidth: device.imageWidth,
+      imageHeight: device.imageHeight,
+      fx: device.focalLengthPx,
+      fy: device.focalLengthPx,
+      cx: device.principalPointX,
+      cy: device.principalPointY,
+      distortion: device.distortion,
+      projectionType: device.projectionType,
+      planeDistance: planeDistance,
+      alpha: options.alpha ?? 1.0,
+      iiifImageSource: iiifImageSource,
+      name: `Photo ${photoId}`,
+      id: `photo-${photoId}`,
+    });
+  }
+
+  return collection;
+};
+
+/**
+ * Load a ContextScene JSON file from a URL and create a ProjectedImageCollection.
+ *
+ * @param {string|Resource} url URL to the ContextScene JSON file.
+ * @param {object} options Options passed to {@link ProjectedImageCollection.fromContextSceneJson}.
+ * @returns {Promise<ProjectedImageCollection>}
+ */
+ProjectedImageCollection.fromContextSceneUrl = async function (url, options) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.defined("url", url);
+  Check.typeOf.object("options", options);
+  //>>includeEnd('debug');
+
+  const resource = url instanceof Resource ? url : new Resource({ url: url });
+  const text = await resource.fetchText();
+  const sceneData = JSON.parse(text);
+  return ProjectedImageCollection.fromContextSceneJson(sceneData, options);
 };
 
 export default ProjectedImageCollection;

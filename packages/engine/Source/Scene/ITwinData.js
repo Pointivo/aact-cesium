@@ -346,9 +346,10 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
     );
   }
 
-  // Get the orientations XML URL.
-  // If rootDocument is defined, use the standard URL resolver.
-  // Otherwise, get the container URL and try common root document names.
+  const isContextScene =
+    metadata.type === ITwinPlatform.RealityDataType.ContextScene;
+
+  // Get the orientations data URL.
   let orientationsUrl;
   if (defined(metadata.rootDocument)) {
     orientationsUrl = await ITwinPlatform.getRealityDataURL(
@@ -357,19 +358,19 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
       metadata.rootDocument,
     );
   } else {
-    // No rootDocument — get container and try to find the XML
     const containerUrl = await ITwinPlatform.getRealityDataContainerUrl(
       iTwinId,
       realityDataId,
     );
-    // Try common ccOrientations root document names
-    const candidates = [
-      "Orientations/Orientations.xml",
-      "orientations.xml",
-      "Orientations.xml",
-      "ccorientations.xml",
-      "CCOrientations.xml",
-    ];
+    const candidates = isContextScene
+      ? ["ContextScene.json", "contextscene.json", "ContextScene.xml"]
+      : [
+          "Orientations/Orientations.xml",
+          "orientations.xml",
+          "Orientations.xml",
+          "ccorientations.xml",
+          "CCOrientations.xml",
+        ];
     let found = false;
     for (const candidate of candidates) {
       const candidateUrlObj = new URL(containerUrl);
@@ -378,7 +379,7 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
       try {
         const testResource = new Resource({ url: testUrl });
         const text = await testResource.fetchText();
-        if (defined(text) && text.indexOf("<BlocksExchange") !== -1) {
+        if (defined(text) && text.length > 0) {
           orientationsUrl = testUrl;
           found = true;
           break;
@@ -389,8 +390,7 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
     }
     if (!found) {
       throw new RuntimeError(
-        `Could not find ccOrientations XML in container for reality data ${realityDataId}. ` +
-          `No rootDocument was specified in the metadata. ` +
+        `Could not find orientations data in container for reality data ${realityDataId}. ` +
           `Tried: ${candidates.join(", ")}`,
       );
     }
@@ -510,10 +510,18 @@ ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
     collectionOptions.authHeader = iiifOptions.authHeader;
   }
 
-  const collection = await ProjectedImageCollection.fromCCOrientationsUrl(
-    orientationsUrl,
-    collectionOptions,
-  );
+  let collection;
+  if (isContextScene) {
+    collection = await ProjectedImageCollection.fromContextSceneUrl(
+      orientationsUrl,
+      collectionOptions,
+    );
+  } else {
+    collection = await ProjectedImageCollection.fromCCOrientationsUrl(
+      orientationsUrl,
+      collectionOptions,
+    );
+  }
 
   return collection;
 };

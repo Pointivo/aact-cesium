@@ -253,6 +253,7 @@ ProjectedImageCollection.prototype.add = function (options) {
     camera: cameraProxy,
     color: this._frustumColor,
     updateOnChange: false,
+    showPlanes: false,
   });
   this._frustumCollection.add(frustumPrimitive);
 

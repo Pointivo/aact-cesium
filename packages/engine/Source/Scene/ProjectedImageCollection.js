@@ -945,11 +945,12 @@ ProjectedImageCollection.fromContextSceneJson = async function (
       continue;
     }
 
-    const cameraToWorld = opkToRotationMatrix(
+    const worldToCamera = opkToRotationMatrix(
       rot.omega || 0,
       rot.phi || 0,
       rot.kappa || 0,
     );
+    const cameraToWorld = Matrix3.transpose(worldToCamera, new Matrix3());
 
     adjustRotationForCameraOrientation(cameraToWorld, "XRightYDown");
 
@@ -979,7 +980,7 @@ ProjectedImageCollection.fromContextSceneJson = async function (
     }
 
     const planeDistance =
-      photo.MedianDepth ||
+      pose.MedianDepth ||
       options.defaultPlaneDistance ||
       collection._defaultPlaneDistance;
 

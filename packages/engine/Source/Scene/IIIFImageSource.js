@@ -101,12 +101,14 @@ IIIFImageSource.prototype.setMaxTextureSize = function (maxTextureSize) {
  * Compute the desired LOD level for a given screen-space pixel coverage,
  * applying hysteresis to prevent thrashing near level boundaries.
  *
- * Upgrade: immediate when screenPixels exceeds current level.
+ * Upgrade: as soon as screenPixels exceeds the level below, load the next
+ *   higher level (so the image always has more detail than the screen needs).
  * Downgrade: delayed until screenPixels drops below the lower level × HYSTERESIS_FACTOR.
  *
  * Example with levels [256, 512, 1024, 2048]:
- *   At level 1024, downgrade to 512 only when screenPixels < 512 * 0.7 = 358
- *   (not at 512, which is the normal threshold).
+ *   screenPixels = 200 → level 256
+ *   screenPixels = 257 → level 512 (exceeds 256, eagerly load next)
+ *   At level 512, downgrade to 256 only when screenPixels < 256 * 0.7 = 179
  *
  * @param {number} screenPixels Approximate screen pixels covered by the projected image.
  * @returns {number} The desired LOD width in pixels (e.g. 256, 512, 1024...).
@@ -114,10 +116,10 @@ IIIFImageSource.prototype.setMaxTextureSize = function (maxTextureSize) {
 IIIFImageSource.prototype.computeDesiredLodLevel = function (screenPixels) {
   const levels = this._lodLevels;
 
-  // Pick smallest level >= screenPixels
+  // Pick the next level above screenPixels for eager upgrade
   let idealLevel = levels[levels.length - 1];
   for (let i = 0; i < levels.length; i++) {
-    if (levels[i] >= screenPixels) {
+    if (levels[i] > screenPixels) {
       idealLevel = levels[i];
       break;
     }

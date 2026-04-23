@@ -240,6 +240,53 @@
         const currentClickHandler = undefined;
         let preRenderListener;
 
+        // --- IIIF cache warming ---
+        // When the displayed image changes, warm the server cache for the
+        // 6 spatially nearest images so they load faster when navigated to.
+        function warmNearbyImages(bestItem, collection) {
+          if (!selectedITwinId) {
+            return;
+          }
+          const count = collection.length;
+          if (count <= 1) {
+            return;
+          }
+
+          // Rank all other items by squared distance to the current best
+          const ranked = [];
+          for (let i = 0; i < count; i++) {
+            const item = collection.get(i);
+            if (item === bestItem) {
+              continue;
+            }
+            const d2 = Cesium.Cartesian3.distanceSquared(
+              bestItem.cameraPosition,
+              item.cameraPosition,
+            );
+            ranked.push({ item: item, d2: d2 });
+          }
+          ranked.sort((a, b) => a.d2 - b.d2);
+
+          const nearest = ranked.slice(0, 6);
+          const authHeader = Cesium.ITwinPlatform._getAuthorizationHeader();
+
+          for (const entry of nearest) {
+            const iiif = entry.item.primitive._iiifImageSource;
+            if (!Cesium.defined(iiif)) {
+              continue;
+            }
+            // _iiifImageBase is like "https://host/{iTwinId}/{stem}"
+            const stem = iiif._iiifImageBase.split("/").pop();
+            if (!stem) {
+              continue;
+            }
+            fetch(`${IIIF_BASE_URL}/${selectedITwinId}/warm/${stem}`, {
+              method: "POST",
+              headers: { Authorization: authHeader },
+            }).catch(() => {}); // fire-and-forget
+          }
+        }
+
         function clearTileset() {
           unlockOrbit();
           if (Cesium.defined(currentTileset)) {
@@ -539,6 +586,11 @@
                   best.frustumPrimitive.show = showAllFrustums ? true : false;
                 }
                 previousBestItem = best;
+
+                // Warm IIIF cache for the 6 nearest images
+                if (Cesium.defined(best)) {
+                  warmNearbyImages(best, currentCollection);
+                }
               }
 
               // When "Show all frustums" is on, force all frustums visible

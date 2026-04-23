@@ -381,18 +381,7 @@
           customOpt.textContent = "Enter ID manually…";
           iTwinSelect.appendChild(customOpt);
 
-          // Auto-restore saved iTwin selection
-          if (savedPrefs.iTwinId) {
-            // If saved ID isn't in the list, add it as a custom entry
-            if (!iTwins.some((t) => t.id === savedPrefs.iTwinId)) {
-              const opt = document.createElement("option");
-              opt.value = savedPrefs.iTwinId;
-              opt.textContent = `${savedPrefs.iTwinId} (saved)`;
-              iTwinSelect.insertBefore(opt, customOpt);
-            }
-            iTwinSelect.value = savedPrefs.iTwinId;
-            await onITwinSelected(savedPrefs.iTwinId);
-          }
+          // Auto-restore saved iTwin selection (deferred to end of script)
         } catch (e) {
           log(`Error fetching iTwins: ${e.message}`);
           console.error(e);
@@ -464,19 +453,6 @@
             log(
               `  ${currentMeshItems.length} mesh, ${csItems.length} ContextScene, ${ccItems.length} CCOrientations, ${currentImageItems.length} image collections`,
             );
-
-            // Auto-restore saved tileset and CC selections
-            if (
-              savedPrefs.tilesetId &&
-              currentMeshItems.some((m) => m.id === savedPrefs.tilesetId)
-            ) {
-              tilesetSelect.value = savedPrefs.tilesetId;
-              tilesetSelect.dispatchEvent(new Event("change"));
-            }
-            if (savedPrefs.ccId && currentCCItems.some((c) => c.id === savedPrefs.ccId)) {
-              ccSelect.value = savedPrefs.ccId;
-              ccSelect.dispatchEvent(new Event("change"));
-            }
           } catch (e) {
             log(`Error listing reality data: ${e.message}`);
             console.error(e);
@@ -1075,6 +1051,35 @@
             unlockOrbit();
           }
         });
+
+        // --- Deferred auto-restore of saved selections ---
+        // Must run after all variables (orbitActive, etc.) are declared.
+        if (savedPrefs.iTwinId) {
+          // If saved ID isn't in the dropdown, add it
+          if (
+            !Array.from(iTwinSelect.options).some((o) => o.value === savedPrefs.iTwinId)
+          ) {
+            const opt = document.createElement("option");
+            opt.value = savedPrefs.iTwinId;
+            opt.textContent = `${savedPrefs.iTwinId} (saved)`;
+            iTwinSelect.insertBefore(opt, iTwinSelect.lastElementChild);
+          }
+          iTwinSelect.value = savedPrefs.iTwinId;
+          await onITwinSelected(savedPrefs.iTwinId);
+
+          // After iTwin loaded, restore tileset and CC
+          if (
+            savedPrefs.tilesetId &&
+            currentMeshItems.some((m) => m.id === savedPrefs.tilesetId)
+          ) {
+            tilesetSelect.value = savedPrefs.tilesetId;
+            tilesetSelect.dispatchEvent(new Event("change"));
+          }
+          if (savedPrefs.ccId && currentCCItems.some((c) => c.id === savedPrefs.ccId)) {
+            ccSelect.value = savedPrefs.ccId;
+            ccSelect.dispatchEvent(new Event("change"));
+          }
+        }
 
         //Sandcastle_End
       };

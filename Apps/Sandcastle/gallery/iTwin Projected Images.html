@@ -217,6 +217,21 @@
         document.getElementById("loginOverlay").style.display = "none";
         Cesium.ITwinPlatform.defaultAccessToken = storedToken.access_token;
 
+        // --- Persist selections across reloads ---
+        const PREFS_KEY = "cesium_itwin_demo_prefs";
+        function loadPrefs() {
+          try {
+            return JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+          } catch {
+            return {};
+          }
+        }
+        function savePrefs(patch) {
+          const prefs = { ...loadPrefs(), ...patch };
+          localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+        }
+        const savedPrefs = loadPrefs();
+
         let selectedITwinId;
 
         const statusPanel = document.getElementById("statusPanel");
@@ -365,6 +380,19 @@
           customOpt.value = "__custom__";
           customOpt.textContent = "Enter ID manually…";
           iTwinSelect.appendChild(customOpt);
+
+          // Auto-restore saved iTwin selection
+          if (savedPrefs.iTwinId) {
+            // If saved ID isn't in the list, add it as a custom entry
+            if (!iTwins.some((t) => t.id === savedPrefs.iTwinId)) {
+              const opt = document.createElement("option");
+              opt.value = savedPrefs.iTwinId;
+              opt.textContent = `${savedPrefs.iTwinId} (saved)`;
+              iTwinSelect.insertBefore(opt, customOpt);
+            }
+            iTwinSelect.value = savedPrefs.iTwinId;
+            await onITwinSelected(savedPrefs.iTwinId);
+          }
         } catch (e) {
           log(`Error fetching iTwins: ${e.message}`);
           console.error(e);
@@ -391,6 +419,7 @@
           currentCCItems = [];
           currentImageItems = [];
           selectedITwinId = iTwinId;
+          savePrefs({ iTwinId: iTwinId });
 
           if (!iTwinId) {
             return;
@@ -435,6 +464,19 @@
             log(
               `  ${currentMeshItems.length} mesh, ${csItems.length} ContextScene, ${ccItems.length} CCOrientations, ${currentImageItems.length} image collections`,
             );
+
+            // Auto-restore saved tileset and CC selections
+            if (
+              savedPrefs.tilesetId &&
+              currentMeshItems.some((m) => m.id === savedPrefs.tilesetId)
+            ) {
+              tilesetSelect.value = savedPrefs.tilesetId;
+              tilesetSelect.dispatchEvent(new Event("change"));
+            }
+            if (savedPrefs.ccId && currentCCItems.some((c) => c.id === savedPrefs.ccId)) {
+              ccSelect.value = savedPrefs.ccId;
+              ccSelect.dispatchEvent(new Event("change"));
+            }
           } catch (e) {
             log(`Error listing reality data: ${e.message}`);
             console.error(e);
@@ -458,6 +500,7 @@
         tilesetSelect.addEventListener("change", async function () {
           clearTileset();
           const itemId = this.value;
+          savePrefs({ tilesetId: itemId });
           if (!itemId || !selectedITwinId) {
             return;
           }
@@ -527,6 +570,7 @@
         ccSelect.addEventListener("change", async function () {
           clearCollection();
           const itemId = this.value;
+          savePrefs({ ccId: itemId });
           if (!itemId || !selectedITwinId) {
             return;
           }
@@ -546,9 +590,9 @@
                 iiifBaseUrl: IIIF_BASE_URL,
                 defaultPlaneDistance: 5.0,
                 frustumScale: 0.1,
-                showFrustums: true,
+                showFrustums: savedShowFrustums,
                 showCameraIcons: true,
-                showLabels: true,
+                showLabels: savedShowLabels,
                 alpha: 1.0,
                 frustumColor: Cesium.Color.WHITE,
               });
@@ -678,55 +722,80 @@
         });
 
         // --- Toggles ---
-        let autoSelectEnabled = true;
-        let snapToImageEnabled = false;
+        const sp = savedPrefs;
+        let autoSelectEnabled = sp.autoSelect !== undefined ? sp.autoSelect : true;
+        let snapToImageEnabled = sp.snapToImage !== undefined ? sp.snapToImage : false;
         let lastSnappedItem;
 
-        Sandcastle.addToggleButton("Auto-select best view", true, function (checked) {
-          autoSelectEnabled = checked;
-          if (Cesium.defined(currentHandler)) {
-            currentHandler.enabled = checked;
-            if (!checked && Cesium.defined(currentCollection)) {
+        Sandcastle.addToggleButton(
+          "Auto-select best view",
+          autoSelectEnabled,
+          function (checked) {
+            autoSelectEnabled = checked;
+            savePrefs({ autoSelect: checked });
+            if (Cesium.defined(currentHandler)) {
+              currentHandler.enabled = checked;
+              if (!checked && Cesium.defined(currentCollection)) {
+                for (let i = 0; i < currentCollection.length; i++) {
+                  currentCollection.setItemShow(currentCollection.get(i), true);
+                }
+              }
+            }
+          },
+        );
+
+        Sandcastle.addToggleButton(
+          "Snap to images",
+          snapToImageEnabled,
+          function (checked) {
+            snapToImageEnabled = checked;
+            savePrefs({ snapToImage: checked });
+            if (!checked) {
+              lastSnappedItem = undefined;
+            }
+            // Target-point scoring produces smaller score deltas between adjacent
+            // cameras than the default 0.05 hysteresis.  Lower it so the handler
+            // can actually switch to the nearest camera when the user pans.
+            if (Cesium.defined(currentHandler)) {
+              currentHandler.hysteresis = checked ? 0.01 : 0.05;
+            }
+          },
+        );
+
+        let showAllFrustums =
+          sp.showAllFrustums !== undefined ? sp.showAllFrustums : false;
+        Sandcastle.addToggleButton(
+          "Show all frustums",
+          showAllFrustums,
+          function (checked) {
+            showAllFrustums = checked;
+            savePrefs({ showAllFrustums: checked });
+            if (Cesium.defined(currentCollection)) {
               for (let i = 0; i < currentCollection.length; i++) {
-                currentCollection.setItemShow(currentCollection.get(i), true);
+                const item = currentCollection.get(i);
+                if (Cesium.defined(item.frustumPrimitive)) {
+                  item.frustumPrimitive.show = checked || currentCollection.showFrustums;
+                }
               }
             }
-          }
-        });
+          },
+        );
 
-        Sandcastle.addToggleButton("Snap to images", false, function (checked) {
-          snapToImageEnabled = checked;
-          if (!checked) {
-            lastSnappedItem = undefined;
-          }
-          // Target-point scoring produces smaller score deltas between adjacent
-          // cameras than the default 0.05 hysteresis.  Lower it so the handler
-          // can actually switch to the nearest camera when the user pans.
-          if (Cesium.defined(currentHandler)) {
-            currentHandler.hysteresis = checked ? 0.01 : 0.05;
-          }
-        });
-
-        let showAllFrustums = false;
-        Sandcastle.addToggleButton("Show all frustums", false, function (checked) {
-          showAllFrustums = checked;
-          if (Cesium.defined(currentCollection)) {
-            for (let i = 0; i < currentCollection.length; i++) {
-              const item = currentCollection.get(i);
-              if (Cesium.defined(item.frustumPrimitive)) {
-                item.frustumPrimitive.show = checked || currentCollection.showFrustums;
-              }
+        const savedShowFrustums = sp.showFrustums !== undefined ? sp.showFrustums : true;
+        Sandcastle.addToggleButton(
+          "Show frustums",
+          savedShowFrustums,
+          function (checked) {
+            savePrefs({ showFrustums: checked });
+            if (Cesium.defined(currentCollection)) {
+              currentCollection.showFrustums = checked;
             }
-          }
-        });
+          },
+        );
 
-        Sandcastle.addToggleButton("Show frustums", true, function (checked) {
-          if (Cesium.defined(currentCollection)) {
-            currentCollection.showFrustums = checked;
-          }
-        });
-
-        Sandcastle.addToggleButton("Show labels", true, function (checked) {
+        const savedShowLabels = sp.showLabels !== undefined ? sp.showLabels : true;
+        Sandcastle.addToggleButton("Show labels", savedShowLabels, function (checked) {
+          savePrefs({ showLabels: checked });
           if (Cesium.defined(currentCollection)) {
             currentCollection.showLabels = checked;
           }

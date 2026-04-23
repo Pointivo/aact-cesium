@@ -615,7 +615,7 @@
                 const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
                 statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
 
-                if (snapToImageEnabled && best !== lastSnappedItem) {
+                if (snapToImageEnabled && !panActive && best !== lastSnappedItem) {
                   lastSnappedItem = best;
 
                   // Capture range before setView changes the camera position

@@ -241,6 +241,7 @@
         let preRenderListener;
 
         function clearTileset() {
+          unlockOrbit();
           if (Cesium.defined(currentTileset)) {
             scene.primitives.remove(currentTileset);
             currentTileset = undefined;
@@ -428,7 +429,46 @@
             });
             scene.primitives.add(currentTileset);
             log(`  ✓ Loaded ${item.displayName}`);
-            viewer.flyTo(currentTileset);
+            viewer.flyTo(currentTileset).then(function (success) {
+              if (!success || !Cesium.defined(currentTileset)) {
+                return;
+              }
+              const bsCenter = currentTileset.boundingSphere.center;
+              // Guard against tileset reporting an uncomputed (origin) bounding sphere
+              if (Cesium.Cartesian3.magnitudeSquared(bsCenter) < 1.0) {
+                return;
+              }
+              Cesium.Cartesian3.clone(bsCenter, focalPoint);
+              const range = Cesium.Cartesian3.distance(
+                viewer.camera.positionWC,
+                focalPoint,
+              );
+              viewer.camera.lookAt(
+                focalPoint,
+                new Cesium.HeadingPitchRange(
+                  viewer.camera.heading,
+                  viewer.camera.pitch,
+                  range,
+                ),
+              );
+              orbitActive = true;
+              activateOrbitNavigation();
+              orbitMarker = viewer.entities.add({
+                position: Cesium.Cartesian3.clone(focalPoint),
+                point: {
+                  pixelSize: 10,
+                  color: Cesium.Color.CYAN,
+                  outlineColor: Cesium.Color.WHITE,
+                  outlineWidth: 2,
+                  disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                },
+              });
+              if (Cesium.defined(currentHandler)) {
+                currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+              }
+              statusPanel.textContent =
+                "Orbiting focal point — right-drag to pan (Esc to unlock)";
+            });
           } catch (e) {
             log(`  ✗ Failed: ${e.message}`);
           }
@@ -523,8 +563,14 @@
                 const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
                 statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
 
-                if (snapToImageEnabled && !orbitActive && best !== lastSnappedItem) {
+                if (snapToImageEnabled && best !== lastSnappedItem) {
                   lastSnappedItem = best;
+
+                  // Capture range before setView changes the camera position
+                  const snapRange = orbitActive
+                    ? Cesium.Cartesian3.distance(viewer.camera.positionWC, focalPoint)
+                    : 50.0;
+
                   viewer.camera.setView({
                     destination: best.cameraPosition,
                     orientation: {
@@ -532,6 +578,40 @@
                       up: best.cameraUp,
                     },
                   });
+
+                  // Advance focal point along the new camera direction at the same range
+                  Cesium.Cartesian3.multiplyByScalar(
+                    best.cameraDirection,
+                    snapRange,
+                    panDeltaScratch,
+                  );
+                  Cesium.Cartesian3.add(best.cameraPosition, panDeltaScratch, focalPoint);
+
+                  // Re-enter orbit. lookAt(target, HPR(h,p,r)) places camera at
+                  // target - r·direction(h,p), so the look direction heading/pitch
+                  // (after setView) puts the camera back at best.cameraPosition.
+                  panHprScratch.heading = viewer.camera.heading;
+                  panHprScratch.pitch = viewer.camera.pitch;
+                  panHprScratch.range = snapRange;
+                  viewer.camera.lookAt(focalPoint, panHprScratch);
+
+                  if (!orbitActive) {
+                    activateOrbitNavigation();
+                    orbitActive = true;
+                  }
+                  // Signal the pan handler to discard its next delta: panPrevScreenPos
+                  // is relative to the pre-snap camera and will produce a garbage world
+                  // delta from the new camera position, causing snap to oscillate back.
+                  panResetNeeded = true;
+                  panRange = snapRange;
+                  panHeading = viewer.camera.heading;
+                  panPitch = viewer.camera.pitch;
+                  if (Cesium.defined(orbitMarker)) {
+                    orbitMarker.position = Cesium.Cartesian3.clone(focalPoint);
+                  }
+                  if (Cesium.defined(currentHandler)) {
+                    currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+                  }
                 }
               } else if (orbitActive) {
                 statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
@@ -604,7 +684,16 @@
         // Pan state — set on RIGHT_DOWN, used in MOUSE_MOVE, cleared on RIGHT_UP
         let panActive = false;
         let panHeading, panPitch, panRange;
+        let panResetNeeded = false; // true after snap fires; next MOUSE_MOVE reseeds prevScreenPos
         const panPrevScreenPos = new Cesium.Cartesian2();
+
+        // Scratch variables for the pan MOUSE_MOVE handler — avoids per-frame allocation
+        const panNormalScratch = new Cesium.Cartesian3();
+        const panPlaneScratch = new Cesium.Plane(Cesium.Cartesian3.UNIT_Z, 0);
+        const panPrevIntersectScratch = new Cesium.Cartesian3();
+        const panCurrIntersectScratch = new Cesium.Cartesian3();
+        const panDeltaScratch = new Cesium.Cartesian3();
+        const panHprScratch = new Cesium.HeadingPitchRange();
 
         // Suppress browser right-click context menu so right-drag pan works
         scene.canvas.addEventListener("contextmenu", function (e) {
@@ -677,6 +766,7 @@
             return;
           }
           panActive = true;
+          panResetNeeded = false;
           Cesium.Cartesian2.clone(click.position, panPrevScreenPos);
           panHeading = scene.camera.heading;
           panPitch = scene.camera.pitch;
@@ -688,19 +778,37 @@
             return;
           }
 
+          // If snap fired since last frame, panPrevScreenPos is from the old camera
+          // position and will produce a garbage delta. Skip this frame and reseed.
+          if (panResetNeeded) {
+            panResetNeeded = false;
+            Cesium.Cartesian2.clone(movement.endPosition, panPrevScreenPos);
+            return;
+          }
+
           const camera = scene.camera;
 
           // Screen-aligned focal plane: through focalPoint, normal = camera direction.
           // This gives "drag on screen = move in world" behaviour with no degeneracy.
-          const planeNormal = Cesium.Cartesian3.clone(camera.directionWC);
-          const planeD = -Cesium.Cartesian3.dot(planeNormal, focalPoint);
-          const plane = new Cesium.Plane(planeNormal, planeD);
+          const planeNormal = Cesium.Cartesian3.clone(
+            camera.directionWC,
+            panNormalScratch,
+          );
+          Cesium.Plane.fromPointNormal(focalPoint, planeNormal, panPlaneScratch);
 
           const prevRay = camera.getPickRay(panPrevScreenPos);
           const currRay = camera.getPickRay(movement.endPosition);
 
-          const prevIntersect = Cesium.IntersectionTests.rayPlane(prevRay, plane);
-          const currIntersect = Cesium.IntersectionTests.rayPlane(currRay, plane);
+          const prevIntersect = Cesium.IntersectionTests.rayPlane(
+            prevRay,
+            panPlaneScratch,
+            panPrevIntersectScratch,
+          );
+          const currIntersect = Cesium.IntersectionTests.rayPlane(
+            currRay,
+            panPlaneScratch,
+            panCurrIntersectScratch,
+          );
 
           // Guard: skip this frame if either ray misses the plane
           if (!Cesium.defined(prevIntersect) || !Cesium.defined(currIntersect)) {
@@ -709,18 +817,14 @@
           }
 
           // Grab-and-drag: subtract delta so the scene follows the cursor
-          const delta = Cesium.Cartesian3.subtract(
-            currIntersect,
-            prevIntersect,
-            new Cesium.Cartesian3(),
-          );
-          Cesium.Cartesian3.subtract(focalPoint, delta, focalPoint);
+          Cesium.Cartesian3.subtract(currIntersect, prevIntersect, panDeltaScratch);
+          Cesium.Cartesian3.subtract(focalPoint, panDeltaScratch, focalPoint);
 
           // Re-apply lookAt with new focal point, preserving heading/pitch/range
-          camera.lookAt(
-            focalPoint,
-            new Cesium.HeadingPitchRange(panHeading, panPitch, panRange),
-          );
+          panHprScratch.heading = panHeading;
+          panHprScratch.pitch = panPitch;
+          panHprScratch.range = panRange;
+          camera.lookAt(focalPoint, panHprScratch);
 
           // Keep the orbit marker dot and image scoring target in sync
           if (Cesium.defined(orbitMarker)) {

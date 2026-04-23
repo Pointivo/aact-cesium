@@ -523,7 +523,7 @@
                 const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
                 statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
 
-                if (snapToImageEnabled && best !== lastSnappedItem) {
+                if (snapToImageEnabled && !orbitActive && best !== lastSnappedItem) {
                   lastSnappedItem = best;
                   viewer.camera.setView({
                     destination: best.cameraPosition,
@@ -594,9 +594,61 @@
           }
         });
 
-        // --- Orbit-around-point & camera-icon fly-to (global double-click) ---
+        // --- Scene-core-style navigation: orbit (left-drag) + pan (right-drag) ---
         let orbitActive = false;
         let orbitMarker;
+
+        // Mutable focal point — set on double-click, updated by pan
+        const focalPoint = new Cesium.Cartesian3();
+
+        // Pan state — set on RIGHT_DOWN, used in MOUSE_MOVE, cleared on RIGHT_UP
+        let panActive = false;
+        let panHeading, panPitch, panRange;
+        const panPrevScreenPos = new Cesium.Cartesian2();
+
+        // Suppress browser right-click context menu so right-drag pan works
+        scene.canvas.addEventListener("contextmenu", function (e) {
+          e.preventDefault();
+        });
+
+        // Remap ScreenSpaceCameraController events to disable RIGHT_DRAG zoom
+        // while orbit/pan is active, then restore when orbit is released.
+        function activateOrbitNavigation() {
+          const csc = scene.screenSpaceCameraController;
+          csc.zoomEventTypes = [
+            Cesium.CameraEventType.WHEEL,
+            Cesium.CameraEventType.PINCH,
+          ];
+          csc.tiltEventTypes = [
+            Cesium.CameraEventType.MIDDLE_DRAG,
+            Cesium.CameraEventType.PINCH,
+            {
+              eventType: Cesium.CameraEventType.LEFT_DRAG,
+              modifier: Cesium.KeyboardEventModifier.CTRL,
+            },
+          ];
+        }
+
+        function deactivateOrbitNavigation() {
+          const csc = scene.screenSpaceCameraController;
+          csc.zoomEventTypes = [
+            Cesium.CameraEventType.RIGHT_DRAG,
+            Cesium.CameraEventType.WHEEL,
+            Cesium.CameraEventType.PINCH,
+          ];
+          csc.tiltEventTypes = [
+            Cesium.CameraEventType.MIDDLE_DRAG,
+            Cesium.CameraEventType.PINCH,
+            {
+              eventType: Cesium.CameraEventType.LEFT_DRAG,
+              modifier: Cesium.KeyboardEventModifier.CTRL,
+            },
+            {
+              eventType: Cesium.CameraEventType.RIGHT_DRAG,
+              modifier: Cesium.KeyboardEventModifier.CTRL,
+            },
+          ];
+        }
 
         function unlockOrbit() {
           if (!orbitActive) {
@@ -604,6 +656,8 @@
           }
           viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
           orbitActive = false;
+          panActive = false;
+          deactivateOrbitNavigation();
           if (Cesium.defined(orbitMarker)) {
             viewer.entities.remove(orbitMarker);
             orbitMarker = undefined;
@@ -613,6 +667,75 @@
           }
           statusPanel.textContent = "Orbit unlocked";
         }
+
+        // Right-drag pan handler — registered once for the app lifetime.
+        // Guards on orbitActive so it is a no-op outside of orbit mode.
+        const panHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+
+        panHandler.setInputAction(function (click) {
+          if (!orbitActive) {
+            return;
+          }
+          panActive = true;
+          Cesium.Cartesian2.clone(click.position, panPrevScreenPos);
+          panHeading = scene.camera.heading;
+          panPitch = scene.camera.pitch;
+          panRange = Cesium.Cartesian3.distance(scene.camera.positionWC, focalPoint);
+        }, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
+
+        panHandler.setInputAction(function (movement) {
+          if (!orbitActive || !panActive) {
+            return;
+          }
+
+          const camera = scene.camera;
+
+          // Screen-aligned focal plane: through focalPoint, normal = camera direction.
+          // This gives "drag on screen = move in world" behaviour with no degeneracy.
+          const planeNormal = Cesium.Cartesian3.clone(camera.directionWC);
+          const planeD = -Cesium.Cartesian3.dot(planeNormal, focalPoint);
+          const plane = new Cesium.Plane(planeNormal, planeD);
+
+          const prevRay = camera.getPickRay(panPrevScreenPos);
+          const currRay = camera.getPickRay(movement.endPosition);
+
+          const prevIntersect = Cesium.IntersectionTests.rayPlane(prevRay, plane);
+          const currIntersect = Cesium.IntersectionTests.rayPlane(currRay, plane);
+
+          // Guard: skip this frame if either ray misses the plane
+          if (!Cesium.defined(prevIntersect) || !Cesium.defined(currIntersect)) {
+            Cesium.Cartesian2.clone(movement.endPosition, panPrevScreenPos);
+            return;
+          }
+
+          // Grab-and-drag: subtract delta so the scene follows the cursor
+          const delta = Cesium.Cartesian3.subtract(
+            currIntersect,
+            prevIntersect,
+            new Cesium.Cartesian3(),
+          );
+          Cesium.Cartesian3.subtract(focalPoint, delta, focalPoint);
+
+          // Re-apply lookAt with new focal point, preserving heading/pitch/range
+          camera.lookAt(
+            focalPoint,
+            new Cesium.HeadingPitchRange(panHeading, panPitch, panRange),
+          );
+
+          // Keep the orbit marker dot and image scoring target in sync
+          if (Cesium.defined(orbitMarker)) {
+            orbitMarker.position = Cesium.Cartesian3.clone(focalPoint);
+          }
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+          }
+
+          Cesium.Cartesian2.clone(movement.endPosition, panPrevScreenPos);
+        }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+        panHandler.setInputAction(function () {
+          panActive = false;
+        }, Cesium.ScreenSpaceEventType.RIGHT_UP);
 
         const globalClickHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
         globalClickHandler.setInputAction(function (click) {
@@ -688,8 +811,9 @@
             orientation: { direction: direction, up: up },
             duration: 0.6,
             complete: function () {
+              Cesium.Cartesian3.clone(pickedPosition, focalPoint);
               viewer.camera.lookAt(
-                pickedPosition,
+                focalPoint,
                 new Cesium.HeadingPitchRange(
                   viewer.camera.heading,
                   viewer.camera.pitch,
@@ -697,10 +821,12 @@
                 ),
               );
               orbitActive = true;
+              activateOrbitNavigation();
               if (Cesium.defined(currentHandler)) {
-                currentHandler.targetPoint = pickedPosition;
+                currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
               }
-              statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
+              statusPanel.textContent =
+                "Orbiting focal point — right-drag to pan (Esc to unlock)";
             },
           });
         }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);

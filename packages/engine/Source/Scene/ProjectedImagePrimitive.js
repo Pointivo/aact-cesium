@@ -673,17 +673,29 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
       iiif.setMaxTextureSize(ContextLimits.maximumTextureSize);
     }
 
-    const screenPixels = IIIFImageSource.computeScreenPixels(
-      frameState,
-      this._boundingSphere,
-    );
+    // Wait for the initial texture to finish loading before upgrading LOD.
+    // Material loads images asynchronously; if we change the uniform URL
+    // while the initial fetch is still in flight, the Material caches the
+    // new URL in _texturePaths immediately but the fetch may fail (e.g. 401
+    // race), leaving the texture stuck at the thumbnail resolution forever.
+    const mat = this._primitive.appearance.material;
+    const currentTex = mat._textures && mat._textures["image"];
+    const initialLoaded =
+      defined(currentTex) && currentTex !== mat._defaultTexture;
 
-    const desiredLevel = iiif.computeDesiredLodLevel(screenPixels);
+    if (initialLoaded) {
+      const screenPixels = IIIFImageSource.computeScreenPixels(
+        frameState,
+        this._boundingSphere,
+      );
 
-    if (desiredLevel !== iiif._currentLodLevel && isFinite(desiredLevel)) {
-      iiif._currentLodLevel = desiredLevel;
-      const resource = iiif.getLodResource(desiredLevel);
-      this._primitive.appearance.material.uniforms.image = resource;
+      const desiredLevel = iiif.computeDesiredLodLevel(screenPixels);
+
+      if (desiredLevel !== iiif._currentLodLevel && isFinite(desiredLevel)) {
+        iiif._currentLodLevel = desiredLevel;
+        const resource = iiif.getLodResource(desiredLevel);
+        mat.uniforms.image = resource;
+      }
     }
   }
 

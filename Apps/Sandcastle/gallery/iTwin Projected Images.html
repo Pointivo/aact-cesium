@@ -515,7 +515,7 @@
               {
                 enabled: autoSelectEnabled,
                 weights: { alignment: 0.7, distance: 0.3 },
-                hysteresis: 0.05,
+                hysteresis: snapToImageEnabled ? 0.01 : 0.05,
                 threshold: 0.05,
               },
             );
@@ -646,6 +646,12 @@
           snapToImageEnabled = checked;
           if (!checked) {
             lastSnappedItem = undefined;
+          }
+          // Target-point scoring produces smaller score deltas between adjacent
+          // cameras than the default 0.05 hysteresis.  Lower it so the handler
+          // can actually switch to the nearest camera when the user pans.
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.hysteresis = checked ? 0.01 : 0.05;
           }
         });
 
@@ -839,6 +845,13 @@
 
         panHandler.setInputAction(function () {
           panActive = false;
+          // Force re-evaluation of snap on the next preRender.
+          // The handler may have already switched mid-drag (with reduced
+          // hysteresis) but the Sandcastle snap check didn't fire because
+          // best === lastSnappedItem at that moment.
+          if (snapToImageEnabled) {
+            lastSnappedItem = undefined;
+          }
         }, Cesium.ScreenSpaceEventType.RIGHT_UP);
 
         const globalClickHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);

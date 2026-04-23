@@ -389,6 +389,9 @@ ProjectedImageCollection.prototype.destroy = function () {
 
 const scratchToCamera = new Cartesian3();
 const scratchToTarget = new Cartesian3();
+const scratchCol = new Cartesian3();
+const scratchReflected = new Cartesian3();
+const scratchUpEcef = new Cartesian3();
 
 /**
  * Compute a 0–1 score indicating how well a projected image item matches
@@ -1066,17 +1069,18 @@ ProjectedImageCollection.fromContextSceneJson = async function (
       // Fix 180° heading error: horizontally reflect cols 1 and 2
       // (negate horizontal component, keep vertical) to convert
       // backward→forward → result is [right, up, forward].
-      const upEcef = Matrix3.getColumn(enuToEcef3, 2, new Cartesian3());
+      const upEcef = Matrix3.getColumn(enuToEcef3, 2, scratchUpEcef);
       for (const colIdx of [1, 2]) {
-        const col = Matrix3.getColumn(cameraToWorld, colIdx, new Cartesian3());
+        const col = Matrix3.getColumn(cameraToWorld, colIdx, scratchCol);
         const dotUp = Cartesian3.dot(col, upEcef);
-        const reflected = Cartesian3.multiplyByScalar(
-          upEcef,
-          2 * dotUp,
-          new Cartesian3(),
+        Cartesian3.multiplyByScalar(upEcef, 2 * dotUp, scratchReflected);
+        Cartesian3.subtract(scratchReflected, col, scratchReflected);
+        Matrix3.setColumn(
+          cameraToWorld,
+          colIdx,
+          scratchReflected,
+          cameraToWorld,
         );
-        Cartesian3.subtract(reflected, col, reflected);
-        Matrix3.setColumn(cameraToWorld, colIdx, reflected, cameraToWorld);
       }
     }
 

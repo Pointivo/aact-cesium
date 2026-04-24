@@ -610,6 +610,16 @@
                 // Warm IIIF cache for the 6 nearest images
                 if (Cesium.defined(best)) {
                   warmNearbyImages(best, currentCollection);
+                  // Dynamic planeDistance: place projection plane at mesh surface
+                  if (Cesium.Cartesian3.magnitudeSquared(focalPoint) > 1.0) {
+                    const dist = Cesium.Cartesian3.distance(
+                      best.cameraPosition,
+                      focalPoint,
+                    );
+                    if (dist > 0.1) {
+                      best.primitive.planeDistance = dist;
+                    }
+                  }
                 }
               }
 
@@ -683,6 +693,14 @@
                   }
                   if (Cesium.defined(currentHandler)) {
                     currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+                  }
+                  // Update planeDistance to match distance to new focal point
+                  const snapDist = Cesium.Cartesian3.distance(
+                    best.cameraPosition,
+                    focalPoint,
+                  );
+                  if (snapDist > 0.1) {
+                    best.primitive.planeDistance = snapDist;
                   }
                 }
               } else if (orbitActive) {
@@ -796,6 +814,7 @@
         const panPrevIntersectScratch = new Cesium.Cartesian3();
         const panCurrIntersectScratch = new Cesium.Cartesian3();
         const panDeltaScratch = new Cesium.Cartesian3();
+        let lastPanPlaneDistance = 0; // throttle planeDistance updates during pan
         const panHprScratch = new Cesium.HeadingPitchRange();
 
         // Suppress browser right-click context menu so right-drag pan works
@@ -935,6 +954,19 @@
           }
           if (Cesium.defined(currentHandler)) {
             currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+          }
+
+          // Update planeDistance for the active image during pan (throttled)
+          if (
+            Cesium.defined(currentHandler) &&
+            Cesium.defined(currentHandler.currentBestItem)
+          ) {
+            const bestItem = currentHandler.currentBestItem;
+            const dist = Cesium.Cartesian3.distance(bestItem.cameraPosition, focalPoint);
+            if (dist > 0.1 && Math.abs(dist - lastPanPlaneDistance) > 0.5) {
+              bestItem.primitive.planeDistance = dist;
+              lastPanPlaneDistance = dist;
+            }
           }
 
           Cesium.Cartesian2.clone(movement.endPosition, panPrevScreenPos);

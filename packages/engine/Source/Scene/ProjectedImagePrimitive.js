@@ -136,6 +136,7 @@ function ProjectedImagePrimitive(options) {
 
   // Internal state
   this._primitive = undefined;
+  this._appearance = undefined;
   this._needsUpdate = true;
   this._boundingSphere = undefined;
 
@@ -168,6 +169,23 @@ Object.defineProperties(ProjectedImagePrimitive.prototype, {
   id: {
     get: function () {
       return this._id;
+    },
+  },
+  /**
+   * Distance from the camera along its forward axis to the projection plane.
+   * Changing this triggers a geometry rebuild on the next frame.
+   * @memberof ProjectedImagePrimitive.prototype
+   * @type {number}
+   */
+  planeDistance: {
+    get: function () {
+      return this._planeDistance;
+    },
+    set: function (value) {
+      if (this._planeDistance !== value) {
+        this._planeDistance = value;
+        this._needsUpdate = true;
+      }
     },
   },
 });
@@ -610,23 +628,27 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
       id: this._id,
     });
 
-    const tintColor = new Color(
-      this._color.red,
-      this._color.green,
-      this._color.blue,
-      this._alpha,
-    );
+    // Reuse the existing appearance if we already have one (geometry-only rebuild).
+    // Creating a new Material when the previous one is mid-fetch throws
+    // "The Resource is already being fetched".
+    if (!defined(this._appearance)) {
+      const tintColor = new Color(
+        this._color.red,
+        this._color.green,
+        this._color.blue,
+        this._alpha,
+      );
 
-    const appearance = new MaterialAppearance({
-      material: new Material({
-        fabric: {
-          uniforms: {
-            image: this._image,
-            color: tintColor,
-            borderColor: new Color(1.0, 1.0, 1.0, 1.0),
-            borderWidth: 0.01,
-          },
-          source: `czm_material czm_getMaterial(czm_materialInput materialInput) {
+      this._appearance = new MaterialAppearance({
+        material: new Material({
+          fabric: {
+            uniforms: {
+              image: this._image,
+              color: tintColor,
+              borderColor: new Color(1.0, 1.0, 1.0, 1.0),
+              borderWidth: 0.01,
+            },
+            source: `czm_material czm_getMaterial(czm_materialInput materialInput) {
   czm_material material = czm_getDefaultMaterial(materialInput);
   vec2 st = materialInput.st;
   float bw = borderWidth;
@@ -640,24 +662,25 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
   }
   return material;
 }`,
-        },
+          },
+          translucent: this._alpha < 1.0,
+        }),
+        faceForward: true,
+        flat: true, // no lighting — show original image colors
         translucent: this._alpha < 1.0,
-      }),
-      faceForward: true,
-      flat: true, // no lighting — show original image colors
-      translucent: this._alpha < 1.0,
-      renderState: {
-        polygonOffset: {
-          enabled: true,
-          factor: -1.0,
-          units: -1.0,
+        renderState: {
+          polygonOffset: {
+            enabled: true,
+            factor: -1.0,
+            units: -1.0,
+          },
         },
-      },
-    });
+      });
+    }
 
     this._primitive = new Primitive({
       geometryInstances: instance,
-      appearance: appearance,
+      appearance: this._appearance,
       asynchronous: false,
       allowPicking: defined(this._id),
     });

@@ -669,6 +669,10 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
         flat: true, // no lighting — show original image colors
         translucent: this._alpha < 1.0,
         renderState: {
+          depthTest: {
+            enabled: false,
+          },
+          depthMask: false,
           polygonOffset: {
             enabled: true,
             factor: -1.0,

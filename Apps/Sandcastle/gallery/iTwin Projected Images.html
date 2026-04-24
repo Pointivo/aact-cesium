@@ -653,6 +653,13 @@
                     ? Cesium.Cartesian3.distance(viewer.camera.positionWC, focalPoint)
                     : 50.0;
 
+                  // Compute planeDistance using the current focalPoint (on mesh surface)
+                  // BEFORE we overwrite it with the synthetic projection below.
+                  const snapPlaneDist = Cesium.Cartesian3.distance(
+                    best.cameraPosition,
+                    focalPoint,
+                  );
+
                   viewer.camera.setView({
                     destination: best.cameraPosition,
                     orientation: {
@@ -694,13 +701,9 @@
                   if (Cesium.defined(currentHandler)) {
                     currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
                   }
-                  // Update planeDistance to match distance to new focal point
-                  const snapDist = Cesium.Cartesian3.distance(
-                    best.cameraPosition,
-                    focalPoint,
-                  );
-                  if (snapDist > 0.1) {
-                    best.primitive.planeDistance = snapDist;
+                  // Update planeDistance using pre-snap focalPoint (on mesh surface)
+                  if (snapPlaneDist > 0.1) {
+                    best.primitive.planeDistance = snapPlaneDist;
                   }
                 }
               } else if (orbitActive) {

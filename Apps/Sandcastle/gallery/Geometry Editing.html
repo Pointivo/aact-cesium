@@ -48,6 +48,10 @@
     <div id="toolbar">
       <button id="btnDrawPolygon" type="button">Draw Polygon</button>
       <button id="btnDrawPolyline" type="button">Draw Polyline</button>
+      <button id="btnPlacePoints" type="button">Place Points</button>
+      <button id="btnTranslate" type="button">Translate</button>
+      <button id="btnUndo" type="button">Undo</button>
+      <button id="btnRedo" type="button">Redo</button>
       <button id="btnCancel" type="button">Cancel / Finish Edit</button>
       <button id="btnClear" type="button">Clear All</button>
       <div id="status">
@@ -74,16 +78,24 @@
           viewer: viewer,
           clampToGround: true,
         });
+        window._viewer = viewer;
+        window._editor = editor;
 
         const statusEl = document.getElementById("status");
         const btnDrawPolygon = document.getElementById("btnDrawPolygon");
         const btnDrawPolyline = document.getElementById("btnDrawPolyline");
+        const btnPlacePoints = document.getElementById("btnPlacePoints");
+        const btnTranslate = document.getElementById("btnTranslate");
+        const btnUndo = document.getElementById("btnUndo");
+        const btnRedo = document.getElementById("btnRedo");
         const btnCancel = document.getElementById("btnCancel");
         const btnClear = document.getElementById("btnClear");
 
         function clearActive() {
           btnDrawPolygon.classList.remove("active");
           btnDrawPolyline.classList.remove("active");
+          btnPlacePoints.classList.remove("active");
+          btnTranslate.classList.remove("active");
         }
 
         // Mode change listener
@@ -99,9 +111,16 @@
                 "Drag vertices to move them. Click gray midpoints to add vertices. " +
                 "Delete key removes last vertex. Escape to finish.";
               break;
+            case Cesium.ShapeEditorMode.PLACING_POINTS:
+              statusEl.textContent = "Click to place points. Press Cancel to stop.";
+              break;
+            case Cesium.ShapeEditorMode.TRANSLATING:
+              statusEl.textContent =
+                "Click a shape to select it. Drag an axis arrow (Red=East, Green=North, Blue=Up) to move it.";
+              break;
             default:
               statusEl.textContent =
-                "Click a button to start drawing. Click an existing shape to edit it.";
+                "Click a button to start. Click an existing shape to edit it. Ctrl+Z/Ctrl+Y to undo/redo.";
               break;
           }
         });
@@ -127,6 +146,26 @@
           clearActive();
           btnDrawPolyline.classList.add("active");
           editor.startDrawing("polyline");
+        });
+
+        btnPlacePoints.addEventListener("click", function () {
+          clearActive();
+          btnPlacePoints.classList.add("active");
+          editor.startPlacingPoints();
+        });
+
+        btnTranslate.addEventListener("click", function () {
+          clearActive();
+          btnTranslate.classList.add("active");
+          editor.startTranslating();
+        });
+
+        btnUndo.addEventListener("click", function () {
+          editor.undo();
+        });
+
+        btnRedo.addEventListener("click", function () {
+          editor.redo();
         });
 
         btnCancel.addEventListener("click", function () {

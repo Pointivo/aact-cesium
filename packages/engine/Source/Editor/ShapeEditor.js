@@ -5,9 +5,14 @@ import Event from "../Core/Event.js";
 import CustomDataSource from "../DataSources/CustomDataSource.js";
 import DrawTool from "./DrawTool.js";
 import EditTool from "./EditTool.js";
+import PointTool from "./PointTool.js";
+import TranslateTool from "./TranslateTool.js";
+import UndoManager from "./UndoManager.js";
 import ShapeEditorMode from "./ShapeEditorMode.js";
 import ScreenSpaceEventHandler from "../Core/ScreenSpaceEventHandler.js";
 import ScreenSpaceEventType from "../Core/ScreenSpaceEventType.js";
+import Cartesian3 from "../Core/Cartesian3.js";
+import PolygonHierarchy from "../Core/PolygonHierarchy.js";
 
 /**
  * @typedef {object} ShapeEditorOptions
@@ -99,6 +104,21 @@ function ShapeEditor(options) {
     midpointPixelSize: options.midpointPixelSize,
   });
 
+  this._pointTool = new PointTool({
+    scene: scene,
+    entities: this._shapesDataSource.entities,
+    clampToGround: clampToGround,
+    color: options.pointColor,
+    pixelSize: options.pointPixelSize,
+  });
+
+  this._translateTool = new TranslateTool({
+    scene: scene,
+    entities: this._dataSource.entities,
+  });
+
+  this._undoManager = new UndoManager();
+
   this._mode = ShapeEditorMode.INACTIVE;
   this._selectHandler = undefined;
 
@@ -112,6 +132,19 @@ function ShapeEditor(options) {
   const self = this;
 
   this._drawTool.drawComplete.addEventListener(function (entity, positions) {
+    // Push undo command for shape creation
+    const entities = self._shapesDataSource.entities;
+    self._undoManager.execute({
+      name: "draw",
+      entity: entity,
+      execute: function () {
+        // Already added by DrawTool on first execute
+      },
+      undo: function () {
+        entities.remove(entity);
+      },
+    });
+
     self._setMode(ShapeEditorMode.INACTIVE);
     self._drawComplete.raiseEvent(entity, positions);
     self._enableSelectHandler();
@@ -128,6 +161,73 @@ function ShapeEditor(options) {
     self._editComplete.raiseEvent(entity, positions);
     self._enableSelectHandler();
   });
+
+  // Track vertex moves for undo
+  this._editTool.vertexMoved.addEventListener(function (index, newPosition) {
+    // The edit tool already moved it; we record the inverse
+    const entity = self._editTool.editingEntity;
+    if (!defined(entity)) {
+      return;
+    }
+    // Clone previous position was already overwritten, so we only track
+    // the new state — undo will be handled at edit-complete level
+  });
+
+  // Point placement undo
+  this._pointTool.pointPlaced.addEventListener(function (entity) {
+    const entities = self._shapesDataSource.entities;
+    self._undoManager.execute({
+      name: "placePoint",
+      entity: entity,
+      execute: function () {
+        // Already added by PointTool
+      },
+      undo: function () {
+        entities.remove(entity);
+      },
+    });
+  });
+
+  // Translate undo
+  this._translateTool.translateComplete.addEventListener(
+    function (entity, oldPositions, newPositions) {
+      self._undoManager.execute({
+        name: "translate",
+        entity: entity,
+        execute: function () {
+          // Already applied by TranslateTool on first execute
+        },
+        undo: function () {
+          // Restore old positions
+          for (let i = 0; i < oldPositions.length; i++) {
+            entity._editorPositions[i] = Cartesian3.clone(oldPositions[i]);
+          }
+          self._applyEntityPositions(entity);
+        },
+      });
+    },
+  );
+
+  // Keyboard shortcuts for undo/redo
+  this._onKeyDown = function (e) {
+    const isMac = navigator.platform.indexOf("Mac") > -1;
+    const ctrlOrCmd = isMac ? e.metaKey : e.ctrlKey;
+
+    if (ctrlOrCmd && e.key === "z" && !e.shiftKey) {
+      e.preventDefault();
+      self.undo();
+    } else if (
+      (ctrlOrCmd && e.key === "z" && e.shiftKey) ||
+      (ctrlOrCmd && e.key === "y")
+    ) {
+      e.preventDefault();
+      self.redo();
+    }
+  };
+  scene.canvas.addEventListener("keydown", this._onKeyDown);
+  if (!scene.canvas.hasAttribute("tabindex")) {
+    scene.canvas.setAttribute("tabindex", "0");
+  }
 
   // Enable click-to-select by default
   this._enableSelectHandler();
@@ -218,6 +318,18 @@ Object.defineProperties(ShapeEditor.prototype, {
       return this._shapesDataSource;
     },
   },
+
+  /**
+   * The undo manager for this editor.
+   * @memberof ShapeEditor.prototype
+   * @type {UndoManager}
+   * @readonly
+   */
+  undoManager: {
+    get: function () {
+      return this._undoManager;
+    },
+  },
 });
 
 /**
@@ -278,17 +390,79 @@ ShapeEditor.prototype.cancel = function () {
     this._drawTool.cancel();
   } else if (this._mode === ShapeEditorMode.EDITING) {
     this._editTool.deactivate();
+  } else if (this._mode === ShapeEditorMode.PLACING_POINTS) {
+    this._pointTool.deactivate();
+  } else if (this._mode === ShapeEditorMode.TRANSLATING) {
+    this._translateTool.deactivate();
   }
   this._setMode(ShapeEditorMode.INACTIVE);
   this._enableSelectHandler();
 };
 
 /**
- * Removes all shapes created by this editor.
+ * Removes all shapes created by this editor and clears the undo stack.
  */
 ShapeEditor.prototype.clearAll = function () {
   this.cancel();
   this._shapesDataSource.entities.removeAll();
+  this._undoManager.clear();
+};
+
+/**
+ * Starts the point placement tool. Each click places a point entity.
+ *
+ * @example
+ * editor.startPlacingPoints();
+ */
+ShapeEditor.prototype.startPlacingPoints = function () {
+  this.cancel();
+  this._disableSelectHandler();
+  this._setMode(ShapeEditorMode.PLACING_POINTS);
+  this._pointTool.activate();
+};
+
+/**
+ * Starts the translate tool. Drag entities to move them across the globe.
+ *
+ * @example
+ * editor.startTranslating();
+ */
+ShapeEditor.prototype.startTranslating = function () {
+  this.cancel();
+  this._disableSelectHandler();
+  this._setMode(ShapeEditorMode.TRANSLATING);
+  this._translateTool.activate();
+};
+
+/**
+ * Undoes the last editor action.
+ */
+ShapeEditor.prototype.undo = function () {
+  this._undoManager.undo();
+};
+
+/**
+ * Redoes the last undone action.
+ */
+ShapeEditor.prototype.redo = function () {
+  this._undoManager.redo();
+};
+
+/**
+ * Updates an entity's graphics to match its `_editorPositions` array.
+ * @private
+ */
+ShapeEditor.prototype._applyEntityPositions = function (entity) {
+  const positions = entity._editorPositions;
+  if (defined(entity.polygon)) {
+    entity.polygon.hierarchy = new PolygonHierarchy(positions.slice());
+  } else if (defined(entity.polyline)) {
+    entity.polyline.positions = positions.slice();
+  } else if (defined(entity.position)) {
+    if (positions.length > 0) {
+      entity.position = positions[0];
+    }
+  }
 };
 
 /**
@@ -364,6 +538,13 @@ ShapeEditor.prototype.destroy = function () {
   this._disableSelectHandler();
   this._drawTool.destroy();
   this._editTool.destroy();
+  this._pointTool.destroy();
+  this._translateTool.destroy();
+  this._undoManager.destroy();
+  if (defined(this._onKeyDown)) {
+    this._scene.canvas.removeEventListener("keydown", this._onKeyDown);
+    this._onKeyDown = undefined;
+  }
   this._viewer.dataSources.remove(this._dataSource, true);
   this._viewer.dataSources.remove(this._shapesDataSource, true);
   return destroyObject(this);

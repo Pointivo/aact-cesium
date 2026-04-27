@@ -13,6 +13,8 @@ import GeometryAttributes from "../Core/GeometryAttributes.js";
 import GeometryInstance from "../Core/GeometryInstance.js";
 import Matrix3 from "../Core/Matrix3.js";
 import PrimitiveType from "../Core/PrimitiveType.js";
+import ContextLimits from "../Renderer/ContextLimits.js";
+import IIIFImageSource from "./IIIFImageSource.js";
 import Material from "./Material.js";
 import MaterialAppearance from "./MaterialAppearance.js";
 import Primitive from "./Primitive.js";
@@ -134,7 +136,12 @@ function ProjectedImagePrimitive(options) {
 
   // Internal state
   this._primitive = undefined;
+  this._appearance = undefined;
   this._needsUpdate = true;
+  this._boundingSphere = undefined;
+
+  // IIIF LOD management (optional — only set when using IIIF tile server)
+  this._iiifImageSource = options.iiifImageSource;
 }
 
 Object.defineProperties(ProjectedImagePrimitive.prototype, {
@@ -162,6 +169,23 @@ Object.defineProperties(ProjectedImagePrimitive.prototype, {
   id: {
     get: function () {
       return this._id;
+    },
+  },
+  /**
+   * Distance from the camera along its forward axis to the projection plane.
+   * Changing this triggers a geometry rebuild on the next frame.
+   * @memberof ProjectedImagePrimitive.prototype
+   * @type {number}
+   */
+  planeDistance: {
+    get: function () {
+      return this._planeDistance;
+    },
+    set: function (value) {
+      if (this._planeDistance !== value) {
+        this._planeDistance = value;
+        this._needsUpdate = true;
+      }
     },
   },
 });
@@ -342,7 +366,9 @@ function getRayDirectionForNdc(ndcX, ndcY, intrinsics, result) {
   // Undistort
   undistortNormalizedPoint(scratchNormalized, distortion, projectionType);
 
-  // Ray direction in camera space: [xn, yn, 1] (camera looks along +Z)
+  // Ray direction in camera space: [xn, yn, 1]
+  // Y stays in image convention (Y-down) because the texture coordinates
+  // are also Y-down, so the two conventions cancel out.
   result.x = scratchNormalized.x;
   result.y = scratchNormalized.y;
   result.z = 1.0;
@@ -595,45 +621,109 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
     }
 
     const geometry = buildProjectionGeometry(this);
+    this._boundingSphere = geometry.boundingSphere;
 
     const instance = new GeometryInstance({
       geometry: geometry,
       id: this._id,
     });
 
-    const tintColor = new Color(
-      this._color.red,
-      this._color.green,
-      this._color.blue,
-      this._alpha,
-    );
+    // Reuse the existing appearance if we already have one (geometry-only rebuild).
+    // Creating a new Material when the previous one is mid-fetch throws
+    // "The Resource is already being fetched".
+    if (!defined(this._appearance)) {
+      const tintColor = new Color(
+        this._color.red,
+        this._color.green,
+        this._color.blue,
+        this._alpha,
+      );
 
-    const appearance = new MaterialAppearance({
-      material: Material.fromType("Image", {
-        image: this._image,
-        repeat: new Cartesian2(1.0, 1.0),
-        color: tintColor,
-      }),
-      faceForward: true,
-      flat: true, // no lighting — show original image colors
-      translucent: this._alpha < 1.0,
-      renderState: {
-        polygonOffset: {
-          enabled: true,
-          factor: -1.0,
-          units: -1.0,
+      this._appearance = new MaterialAppearance({
+        material: new Material({
+          fabric: {
+            uniforms: {
+              image: this._image,
+              color: tintColor,
+              borderColor: new Color(1.0, 1.0, 1.0, 1.0),
+              borderWidth: 0.01,
+            },
+            source: `czm_material czm_getMaterial(czm_materialInput materialInput) {
+  czm_material material = czm_getDefaultMaterial(materialInput);
+  vec2 st = materialInput.st;
+  float bw = borderWidth;
+  if (st.x < bw || st.x > 1.0 - bw || st.y < bw || st.y > 1.0 - bw) {
+    material.diffuse = borderColor.rgb;
+    material.alpha = borderColor.a;
+  } else {
+    vec4 texColor = texture(image, st);
+    material.diffuse = texColor.rgb * color.rgb;
+    material.alpha = texColor.a * color.a;
+  }
+  return material;
+}`,
+          },
+          translucent: this._alpha < 1.0,
+        }),
+        faceForward: true,
+        flat: true, // no lighting — show original image colors
+        translucent: this._alpha < 1.0,
+        renderState: {
+          depthTest: {
+            enabled: false,
+          },
+          depthMask: false,
+          polygonOffset: {
+            enabled: true,
+            factor: -1.0,
+            units: -1.0,
+          },
         },
-      },
-    });
+      });
+    }
 
     this._primitive = new Primitive({
       geometryInstances: instance,
-      appearance: appearance,
+      appearance: this._appearance,
       asynchronous: false,
       allowPicking: defined(this._id),
     });
 
     this._needsUpdate = false;
+  }
+
+  // LOD management for IIIF images
+  if (defined(this._iiifImageSource) && defined(this._boundingSphere)) {
+    const iiif = this._iiifImageSource;
+
+    if (!iiif._maxTextureSizeSet) {
+      iiif.setMaxTextureSize(ContextLimits.maximumTextureSize);
+    }
+
+    // Wait for the initial texture to finish loading before upgrading LOD.
+    // Material loads images asynchronously; if we change the uniform URL
+    // while the initial fetch is still in flight, the Material caches the
+    // new URL in _texturePaths immediately but the fetch may fail (e.g. 401
+    // race), leaving the texture stuck at the thumbnail resolution forever.
+    const mat = this._primitive.appearance.material;
+    const currentTex = mat._textures && mat._textures["image"];
+    const initialLoaded =
+      defined(currentTex) && currentTex !== mat._defaultTexture;
+
+    if (initialLoaded) {
+      const screenPixels = IIIFImageSource.computeScreenPixels(
+        frameState,
+        this._boundingSphere,
+      );
+
+      const desiredLevel = iiif.computeDesiredLodLevel(screenPixels);
+
+      if (desiredLevel !== iiif._currentLodLevel && isFinite(desiredLevel)) {
+        iiif._currentLodLevel = desiredLevel;
+        const resource = iiif.getLodResource(desiredLevel);
+        mat.uniforms.image = resource;
+      }
+    }
   }
 
   this._primitive.update(frameState);

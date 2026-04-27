@@ -54,6 +54,7 @@ ITwinPlatform.RealityDataType = Object.freeze({
   Unstructured: "Unstructured",
   CCOrientations: "CCOrientations",
   CCImageCollection: "CCImageCollection",
+  ContextScene: "ContextScene",
 });
 
 /**

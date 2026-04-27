@@ -25,11 +25,18 @@ import ProjectedImageCollection from "./ProjectedImageCollection.js";
  * @param {number} [options.threshold=0.1] Minimum score to show any image.
  * @param {number} [options.hysteresis=0.05] Score margin the current best must lose by before switching.
  * @param {boolean} [options.showOnlyBest=true] If true, only the best item is shown. If false, all items above threshold are shown.
+ * @param {Function} [options.warmCallback] Called with an array of candidate items when the best item changes. Use to pre-warm server caches for likely next images.
+ * @param {number} [options.warmCount=5] Number of top-scoring candidates to pass to warmCallback.
  *
  * @example
  * const handler = new Cesium.ProjectedImageCollectionHandler(collection, viewer.scene, {
  *   weights: { alignment: 0.7, distance: 0.3 },
  *   hysteresis: 0.05,
+ *   warmCount: 5,
+ *   warmCallback: function (items) {
+ *     // Pre-warm IIIF server cache for top candidates
+ *     items.forEach(function (item) { warmServerCache(item); });
+ *   },
  * });
  * // Later:
  * handler.enabled = false; // pause automatic switching
@@ -53,6 +60,10 @@ function ProjectedImageCollectionHandler(collection, scene, options) {
   this._hysteresis = options.hysteresis ?? 0.05;
   this._showOnlyBest = options.showOnlyBest ?? true;
   this._currentBestItem = undefined;
+  this._targetPoint = undefined;
+  this._warmCallback = options.warmCallback;
+  this._warmCount = options.warmCount ?? 5;
+  this._warmedSet = new WeakSet();
 
   this._preRenderListener = scene.preRender.addEventListener(
     ProjectedImageCollectionHandler.prototype._onPreRender,
@@ -156,6 +167,51 @@ Object.defineProperties(ProjectedImageCollectionHandler.prototype, {
       return this._currentBestItem;
     },
   },
+
+  /**
+   * Optional target point for scoring. When set, images are scored by how well
+   * the source camera covers this point rather than by viewer direction alignment.
+   * Set to the orbit pivot to get stable, target-aware image selection.
+   * @memberof ProjectedImageCollectionHandler.prototype
+   * @type {Cartesian3|undefined}
+   */
+  targetPoint: {
+    get: function () {
+      return this._targetPoint;
+    },
+    set: function (value) {
+      this._targetPoint = value;
+    },
+  },
+
+  /**
+   * Called with an array of candidate items when the best item changes.
+   * Use to pre-warm server caches for likely next images.
+   * @memberof ProjectedImageCollectionHandler.prototype
+   * @type {Function|undefined}
+   */
+  warmCallback: {
+    get: function () {
+      return this._warmCallback;
+    },
+    set: function (value) {
+      this._warmCallback = value;
+    },
+  },
+
+  /**
+   * Number of top-scoring candidates to pass to warmCallback.
+   * @memberof ProjectedImageCollectionHandler.prototype
+   * @type {number}
+   */
+  warmCount: {
+    get: function () {
+      return this._warmCount;
+    },
+    set: function (value) {
+      this._warmCount = value;
+    },
+  },
 });
 
 /**
@@ -169,6 +225,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
   const collection = this._collection;
   const camera = this._scene.camera;
   const length = collection.length;
+  const tp = this._targetPoint;
 
   if (length === 0) {
     this._currentBestItem = undefined;
@@ -177,6 +234,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
 
   let bestItem;
   let bestScore = -Infinity;
+  const scored = [];
 
   // Score all items
   for (let i = 0; i < length; i++) {
@@ -185,7 +243,10 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
       item,
       camera,
       this._weights,
+      tp,
     );
+
+    scored.push({ item: item, score: score });
 
     if (score > bestScore) {
       bestScore = score;
@@ -202,6 +263,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
         this._currentBestItem,
         camera,
         this._weights,
+        tp,
       ) +
         this._hysteresis
   ) {
@@ -210,6 +272,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
       bestItem,
       camera,
       this._weights,
+      tp,
     );
   }
 
@@ -218,7 +281,43 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
     bestItem = undefined;
   }
 
+  const previousBest = this._currentBestItem;
   this._currentBestItem = bestItem;
+
+  // Warm top candidates when the best item changes
+  if (bestItem !== previousBest && defined(this._warmCallback)) {
+    const threshold = this._threshold;
+    const warmedSet = this._warmedSet;
+
+    scored.sort((a, b) => b.score - a.score);
+
+    const candidates = [];
+    for (let i = 0; i < scored.length; i++) {
+      const entry = scored[i];
+      if (entry.item === bestItem) {
+        continue;
+      }
+      if (entry.score < threshold) {
+        break; // sorted descending, no more above threshold
+      }
+      if (warmedSet.has(entry.item)) {
+        continue;
+      }
+      candidates.push(entry.item);
+      warmedSet.add(entry.item);
+      if (candidates.length >= this._warmCount) {
+        break;
+      }
+    }
+
+    if (candidates.length > 0) {
+      try {
+        this._warmCallback(candidates);
+      } catch (e) {
+        console.warn("ProjectedImageCollectionHandler: warmCallback error", e);
+      }
+    }
+  }
 
   // Update visibility
   if (this._showOnlyBest) {
@@ -234,6 +333,7 @@ ProjectedImageCollectionHandler.prototype._onPreRender = function () {
         item,
         camera,
         this._weights,
+        tp,
       );
       collection.setItemShow(item, score >= this._threshold);
     }

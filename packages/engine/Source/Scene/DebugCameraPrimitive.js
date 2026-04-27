@@ -29,6 +29,7 @@ import Primitive from "./Primitive.js";
  * @param {Color} [options.color=Color.CYAN] The color of the debug outline.
  * @param {boolean} [options.updateOnChange=true] Whether the primitive updates when the underlying camera changes.
  * @param {boolean} [options.show=true] Determines if this primitive will be shown.
+ * @param {boolean} [options.showPlanes=true] Whether to render the semi-transparent frustum face planes.
  * @param {object} [options.id] A user-defined object to return when the instance is picked with {@link Scene#pick}.
  *
  * @example
@@ -58,6 +59,7 @@ function DebugCameraPrimitive(options) {
    * @default true
    */
   this.show = options.show ?? true;
+  this._showPlanes = options.showPlanes ?? true;
 
   /**
    * User-defined value returned when the primitive is picked.
@@ -209,7 +211,9 @@ DebugCameraPrimitive.prototype.update = function (frameState) {
   length = planesPrimitives.length;
   for (i = 0; i < length; ++i) {
     outlinePrimitives[i].update(frameState);
-    planesPrimitives[i].update(frameState);
+    if (this._showPlanes) {
+      planesPrimitives[i].update(frameState);
+    }
   }
 };
 

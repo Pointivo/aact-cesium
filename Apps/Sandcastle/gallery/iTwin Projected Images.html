@@ -323,25 +323,63 @@
           }
 
           const iTwins = allITwins;
-          log(`Found ${iTwins.length} iTwins`);
+          log(`Found ${iTwins.length} iTwins — checking for 3D tiles…`);
 
           const noneOpt = document.createElement("option");
           noneOpt.value = "";
-          noneOpt.textContent = "(select an iTwin)";
+          noneOpt.textContent = "(loading — checking for 3D tiles…)";
           iTwinSelect.appendChild(noneOpt);
 
-          for (const itwin of iTwins) {
-            const opt = document.createElement("option");
-            opt.value = itwin.id;
-            opt.textContent = itwin.displayName || itwin.number || itwin.id;
-            iTwinSelect.appendChild(opt);
-          }
-
-          // Manual ID entry option
+          // Manual ID entry option (always available)
           const customOpt = document.createElement("option");
           customOpt.value = "__custom__";
           customOpt.textContent = "Enter ID manually…";
           iTwinSelect.appendChild(customOpt);
+
+          // Check each iTwin for 3D tiles reality data in parallel batches
+          const tileTypes = [
+            "Cesium3DTiles",
+            "RealityMesh3DTiles",
+            "PNTS",
+            "Terrain3DTiles",
+            "GS_3DT",
+          ];
+
+          async function hasTiles(iTwinId) {
+            try {
+              const data = await Cesium.ITwinPlatform.listRealityData(iTwinId, {
+                types: tileTypes,
+              });
+              return data.length > 0;
+            } catch {
+              return false;
+            }
+          }
+
+          // Process in batches of 10 to avoid flooding requests
+          const BATCH_SIZE = 10;
+          let matchCount = 0;
+          for (let i = 0; i < iTwins.length; i += BATCH_SIZE) {
+            const batch = iTwins.slice(i, i + BATCH_SIZE);
+            const results = await Promise.all(
+              batch.map(async (itwin) => ({
+                itwin,
+                has: await hasTiles(itwin.id),
+              })),
+            );
+            for (const { itwin, has } of results) {
+              if (has) {
+                matchCount++;
+                const opt = document.createElement("option");
+                opt.value = itwin.id;
+                opt.textContent = itwin.displayName || itwin.number || itwin.id;
+                iTwinSelect.insertBefore(opt, customOpt);
+              }
+            }
+          }
+
+          noneOpt.textContent = `(select an iTwin — ${matchCount} with 3D tiles)`;
+          log(`Found ${matchCount} iTwins with 3D tiles`);
 
           // Auto-restore saved iTwin selection (deferred to end of script)
         } catch (e) {

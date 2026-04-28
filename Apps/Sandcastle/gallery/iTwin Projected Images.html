@@ -484,6 +484,7 @@
               });
               if (Cesium.defined(currentHandler)) {
                 currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+                currentHandler.enabled = autoSelectEnabled;
               }
               statusPanel.textContent =
                 "Orbiting focal point — right-drag to pan (Esc to unlock)";
@@ -533,7 +534,7 @@
               currentCollection,
               scene,
               {
-                enabled: autoSelectEnabled,
+                enabled: false,
                 weights: { alignment: 0.7, distance: 0.3 },
                 hysteresis: snapToImageEnabled ? 0.01 : 0.05,
                 threshold: 0.05,
@@ -850,6 +851,13 @@
           }
           if (Cesium.defined(currentHandler)) {
             currentHandler.targetPoint = undefined;
+            currentHandler.enabled = false;
+            // Hide all projected images when orbit is unlocked
+            if (Cesium.defined(currentCollection)) {
+              for (let i = 0; i < currentCollection.length; i++) {
+                currentCollection.setItemShow(currentCollection.get(i), false);
+              }
+            }
           }
           statusPanel.textContent = "Orbit unlocked";
         }
@@ -1045,6 +1053,7 @@
               activateOrbitNavigation();
               if (Cesium.defined(currentHandler)) {
                 currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+                currentHandler.enabled = autoSelectEnabled;
               }
               statusPanel.textContent =
                 "Orbiting focal point — right-drag to pan (Esc to unlock)";

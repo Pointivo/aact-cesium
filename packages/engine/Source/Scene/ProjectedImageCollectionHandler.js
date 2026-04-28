@@ -69,6 +69,13 @@ function ProjectedImageCollectionHandler(collection, scene, options) {
     ProjectedImageCollectionHandler.prototype._onPreRender,
     this,
   );
+
+  // When starting disabled, hide all projected image primitives immediately
+  // so they don't all try to load textures simultaneously (request
+  // throttling would permanently break most textures).
+  if (!this._enabled) {
+    this._hideAllImagePrimitives();
+  }
 }
 
 Object.defineProperties(ProjectedImageCollectionHandler.prototype, {
@@ -96,6 +103,9 @@ Object.defineProperties(ProjectedImageCollectionHandler.prototype, {
     },
     set: function (value) {
       this._enabled = value;
+      if (!value) {
+        this._hideAllImagePrimitives();
+      }
     },
   },
 
@@ -213,6 +223,21 @@ Object.defineProperties(ProjectedImageCollectionHandler.prototype, {
     },
   },
 });
+
+/**
+ * Hide all projected image primitives in the collection.
+ * Only hides the image primitive itself — camera icons, labels, and
+ * frustums remain visible so the user can still see where cameras are.
+ * @private
+ */
+ProjectedImageCollectionHandler.prototype._hideAllImagePrimitives =
+  function () {
+    const collection = this._collection;
+    for (let i = 0; i < collection.length; i++) {
+      collection.get(i).primitive.show = false;
+    }
+    this._currentBestItem = undefined;
+  };
 
 /**
  * @private

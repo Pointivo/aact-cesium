@@ -140,6 +140,7 @@ ITwinData.createTilesetForRealityDataId = async function ({
     ITwinPlatform.RealityDataType.RealityMesh3DTiles,
     ITwinPlatform.RealityDataType.Terrain3DTiles,
     ITwinPlatform.RealityDataType.GaussianSplat3DTiles,
+    ITwinPlatform.RealityDataType.GaussianSplats,
   ];
 
   if (!supportedRealityDataTypes.includes(type)) {

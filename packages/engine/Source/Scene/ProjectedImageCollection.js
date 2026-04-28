@@ -2,7 +2,6 @@ import BillboardCollection from "./BillboardCollection.js";
 import buildModuleUrl from "../Core/buildModuleUrl.js";
 import Cartesian3 from "../Core/Cartesian3.js";
 import Cartographic from "../Core/Cartographic.js";
-import CesiumMath from "../Core/Math.js";
 import Check from "../Core/Check.js";
 import Color from "../Core/Color.js";
 import DebugCameraPrimitive from "./DebugCameraPrimitive.js";
@@ -498,13 +497,6 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlString, "application/xml");
 
-  // Log root element and structure for debugging
-  const rootTag = doc.documentElement ? doc.documentElement.tagName : "none";
-  console.log(`XML root element: <${rootTag}>`);
-  if (rootTag !== "BlocksExchange") {
-    console.log(`XML snippet: ${xmlString.substring(0, 500)}`);
-  }
-
   const collection = new ProjectedImageCollection({
     defaultPlaneDistance: options.defaultPlaneDistance ?? 50.0,
     frustumScale: options.frustumScale,
@@ -515,47 +507,27 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
   });
 
   const blocks = doc.querySelectorAll("Block");
-  console.log(`CCOrientations: ${blocks.length} blocks found`);
   for (const block of blocks) {
     const photogroups = block.querySelectorAll("Photogroup");
-    console.log(`  Block has ${photogroups.length} photogroups`);
     for (const photogroup of photogroups) {
       const pgParams = parsePhotogroupIntrinsics(photogroup);
       const photos = photogroup.querySelectorAll("Photo");
-      console.log(`    Photogroup has ${photos.length} photos`);
-
-      let skippedNoPose = 0;
-      let skippedNoRotCenter = 0;
-      let skippedImageResolve = 0;
-      let loggedSample = false;
 
       for (const photo of photos) {
-        // Log first photo's child elements to debug structure
-        if (!loggedSample) {
-          const childTags = Array.from(photo.children).map((c) => c.tagName);
-          console.log("    First photo child elements:", childTags.join(", "));
-          console.log(
-            "    First photo XML:",
-            photo.outerHTML.substring(0, 500),
-          );
-          loggedSample = true;
-        }
-
         const pose = photo.querySelector("Pose");
         if (!pose) {
-          skippedNoPose++;
-          continue; // Skip photos without pose data
+          continue;
         }
 
         const rotation = pose.querySelector("Rotation");
         const center = pose.querySelector("Center");
         if (!rotation || !center) {
-          skippedNoRotCenter++;
           continue;
         }
 
         // Parse pose
-        // ccOrientations stores camera→world rotation (columns = camera axes in world).
+        // BlocksExchange stores world→camera rotation (standard CV convention).
+        // parseRotationMatrix transposes to camera→world (columns = camera axes in ECEF).
         const cameraToWorld = parseRotationMatrix(rotation);
 
         // Handle CameraOrientation convention
@@ -574,45 +546,6 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
         const cz = parseFloat(getTextContent(center, "z", "0"));
         const cameraPosition = new Cartesian3(cx, cy, cz);
 
-        // Debug: log raw matrix and derived direction for first 5 cameras
-        if (collection._items.length < 5) {
-          const photoId_ = getTextContent(photo, "Id", "?");
-          const fwd = new Cartesian3();
-          Matrix3.getColumn(cameraToWorld, 2, fwd);
-          // Convert ECEF position to lon/lat/alt for context
-          const carto = Cartographic.fromCartesian(cameraPosition);
-          const lonDeg = CesiumMath.toDegrees(carto.longitude).toFixed(6);
-          const latDeg = CesiumMath.toDegrees(carto.latitude).toFixed(6);
-          const altM = carto.height.toFixed(1);
-          // Compute ENU-relative direction to understand local orientation
-          const enuMatrix4 = Transforms.eastNorthUpToFixedFrame(cameraPosition);
-          const enuMatrix3 = Matrix4.getMatrix3(enuMatrix4, new Matrix3());
-          const enuInv = Matrix3.transpose(enuMatrix3, new Matrix3());
-          const localFwd = Matrix3.multiplyByVector(
-            enuInv,
-            fwd,
-            new Cartesian3(),
-          );
-          console.log(
-            `[DEBUG CAM ${photoId_}] pos=(${lonDeg}, ${latDeg}, alt=${altM}m) ` +
-              `ECEF fwd=(${fwd.x.toFixed(4)}, ${fwd.y.toFixed(4)}, ${fwd.z.toFixed(4)}) ` +
-              `ENU fwd=(E:${localFwd.x.toFixed(4)}, N:${localFwd.y.toFixed(4)}, Up:${localFwd.z.toFixed(4)})`,
-          );
-          // Also log raw M_ij from XML
-          const m00 = parseFloatTag(rotation, "M_00", 0);
-          const m01 = parseFloatTag(rotation, "M_01", 0);
-          const m02 = parseFloatTag(rotation, "M_02", 0);
-          const m10 = parseFloatTag(rotation, "M_10", 0);
-          const m11 = parseFloatTag(rotation, "M_11", 0);
-          const m12 = parseFloatTag(rotation, "M_12", 0);
-          const m20 = parseFloatTag(rotation, "M_20", 0);
-          const m21 = parseFloatTag(rotation, "M_21", 0);
-          const m22 = parseFloatTag(rotation, "M_22", 0);
-          console.log(
-            `  Raw XML M: [${m00.toFixed(4)}, ${m01.toFixed(4)}, ${m02.toFixed(4)}; ${m10.toFixed(4)}, ${m11.toFixed(4)}, ${m12.toFixed(4)}; ${m20.toFixed(4)}, ${m21.toFixed(4)}, ${m22.toFixed(4)}]`,
-          );
-        }
-
         // Compute focal length in pixels
         const fxPx = pgParams.focalLengthPx;
         const fyPx = pgParams.focalLengthPx;
@@ -626,14 +559,7 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
         try {
           imageUrl = await options.resolveImageUrl(imagePath);
         } catch {
-          skippedImageResolve++;
-          continue; // Skip photos whose images can't be resolved
-        }
-
-        // Debug: log the first image path and URL
-        if (collection._items.length === 0) {
-          console.log("First ImagePath from XML:", imagePath);
-          console.log("Resolved image URL:", imageUrl);
+          continue;
         }
 
         const planeDistance =
@@ -674,10 +600,6 @@ ProjectedImageCollection.fromCCOrientationsXml = async function (
           id: `photo-${photoId}`,
         });
       }
-
-      console.log(
-        `    Skipped: ${skippedNoPose} no pose, ${skippedNoRotCenter} no rot/center, ${skippedImageResolve} image resolve failed`,
-      );
     }
   }
 
@@ -715,9 +637,14 @@ function parseRotationMatrix(rotationEl) {
   const m21 = parseFloatTag(rotationEl, "M_21", 0);
   const m22 = parseFloatTag(rotationEl, "M_22", 1);
 
-  // Matrix3 is column-major: [col0.x, col0.y, col0.z, col1.x, ...]
-  // The XML M_ij = row i, column j, so we need to transpose for column-major
-  return new Matrix3(m00, m01, m02, m10, m11, m12, m20, m21, m22);
+  // BlocksExchange M_ij = row i, col j in world→camera convention.
+  // Matrix3 constructor takes row-major visual layout, so this faithfully
+  // reconstructs the world→camera matrix. Transpose to get camera→world
+  // (columns = camera axes in ECEF).
+  return Matrix3.transpose(
+    new Matrix3(m00, m01, m02, m10, m11, m12, m20, m21, m22),
+    new Matrix3(),
+  );
 }
 
 function parsePhotogroupIntrinsics(photogroup) {

@@ -303,17 +303,26 @@
         // --- Fetch and populate iTwins ---
         log("Fetching iTwins...");
         try {
-          const resource = new Cesium.Resource({
-            url: `${Cesium.ITwinPlatform.apiEndpoint}itwins/recents`,
-            headers: {
-              Authorization: Cesium.ITwinPlatform._getAuthorizationHeader(),
-              Accept: "application/vnd.bentley.itwin-platform.v2+json",
-              Prefer: "return=representation",
-            },
-          });
-          resource.appendQueryParameters({ $top: "100" });
-          const resp = await resource.fetchJson();
-          const iTwins = resp.iTwins || [];
+          const allITwins = [];
+          let nextUrl = `${Cesium.ITwinPlatform.apiEndpoint}itwins?$top=100`;
+          const iTwinHeaders = {
+            Authorization: Cesium.ITwinPlatform._getAuthorizationHeader(),
+            Accept: "application/vnd.bentley.itwin-platform.v2+json",
+            Prefer: "return=representation",
+          };
+
+          while (nextUrl) {
+            const resource = new Cesium.Resource({
+              url: nextUrl,
+              headers: iTwinHeaders,
+            });
+            const resp = await resource.fetchJson();
+            const page = resp.iTwins || [];
+            allITwins.push(...page);
+            nextUrl = resp._links && resp._links.next ? resp._links.next.href : null;
+          }
+
+          const iTwins = allITwins;
           log(`Found ${iTwins.length} iTwins`);
 
           const noneOpt = document.createElement("option");

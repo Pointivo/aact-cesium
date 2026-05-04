@@ -411,10 +411,11 @@
           "GS_PLY",
         ];
         const splatTypes = ["GS_3DT", "GaussianSplats", "GS_PLY"];
+        // Only meshes are dense enough for reliable depth picking.
+        // Point clouds (PNTS) are too sparse — picks fall through to the globe.
         const depthSourceTypes = [
           "Cesium3DTiles",
           "RealityMesh3DTiles",
-          "PNTS",
           "Terrain3DTiles",
         ];
         let currentMeshItems = [];

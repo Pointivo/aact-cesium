@@ -259,6 +259,8 @@
           infoBox: false,
           selectionIndicator: false,
           terrain: Cesium.Terrain.fromWorldTerrain(),
+          requestRenderMode: true,
+          maximumRenderTimeChange: Infinity,
         });
         window.__viewer = viewer;
         const scene = viewer.scene;
@@ -679,6 +681,9 @@
                     });
                   depthSourceTileset.show = false;
                   depthSourceTileset.preloadWhenHidden = true;
+                  // Limit memory — depth source only needs geometry, not textures.
+                  depthSourceTileset.cacheBytes = 128 * 1024 * 1024;
+                  depthSourceTileset.maximumCacheOverflowBytes = 64 * 1024 * 1024;
                   scene.primitives.add(depthSourceTileset);
                   log(`  ✓ Depth source: ${depthItem.displayName} (hidden)`);
                 } catch (depthErr) {

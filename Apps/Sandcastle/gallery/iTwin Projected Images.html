@@ -270,6 +270,8 @@
             scene.primitives.remove(currentTileset);
             currentTileset = undefined;
           }
+          // Restore default zoom factor when switching tilesets.
+          scene.screenSpaceCameraController.zoomFactor = 5.0;
         }
 
         function clearCollection() {
@@ -560,6 +562,14 @@
               if (!success || !Cesium.defined(currentTileset)) {
                 return;
               }
+
+              // Gaussian splat models are typically small (hundreds of
+              // meters).  Reduce the zoom factor so scroll-wheel steps
+              // are proportional to the model, not the globe.
+              if (splatTypes.includes(item.type)) {
+                scene.screenSpaceCameraController.zoomFactor = 2.0;
+              }
+
               const bsCenter = currentTileset.boundingSphere.center;
               // Guard against tileset reporting an uncomputed (origin) bounding sphere
               if (Cesium.Cartesian3.magnitudeSquared(bsCenter) < 1.0) {
@@ -1096,31 +1106,60 @@
             }
           }
 
-          // 2. Otherwise, pick a 3D position and set it as the orbit center
-          let pickedPosition = scene.pickPosition(click.position);
+          // 2. Otherwise, pick a 3D position and set it as the orbit center.
+          //
+          // Gaussian splats don't write depth, so scene.pickPosition()
+          // falls through to the globe — returning a position far behind
+          // the model.  When a hidden depth-source mesh is available we
+          // skip the regular pick entirely, render the mesh for one
+          // frame, and read the depth from that.
+          let pickedPosition;
+          const hasDepthSource = Cesium.defined(depthSourceTileset);
+          const bs = currentTileset?.boundingSphere;
 
-          // Fallback for geometry that doesn't write depth (e.g. Gaussian splats):
-          // temporarily show the hidden depth-source mesh, render one frame to
-          // populate the depth buffer, then pick from that.
-          if (!Cesium.defined(pickedPosition) && Cesium.defined(depthSourceTileset)) {
+          if (hasDepthSource) {
             depthSourceTileset.show = true;
             scene.render(viewer.clock.currentTime);
             pickedPosition = scene.pickPosition(click.position);
             depthSourceTileset.show = false;
+
+            // Discard picks that landed on the globe behind the model.
+            if (Cesium.defined(pickedPosition) && Cesium.defined(bs)) {
+              const pickDist = Cesium.Cartesian3.distance(
+                viewer.camera.positionWC,
+                pickedPosition,
+              );
+              const bsDist = Cesium.Cartesian3.distance(
+                viewer.camera.positionWC,
+                bs.center,
+              );
+              if (pickDist > bsDist + bs.radius) {
+                pickedPosition = undefined;
+              }
+            }
+          } else {
+            pickedPosition = scene.pickPosition(click.position);
           }
 
-          // Final fallback: ray at bounding sphere center distance
-          if (
-            !Cesium.defined(pickedPosition) &&
-            Cesium.defined(currentTileset) &&
-            Cesium.defined(currentTileset.boundingSphere)
-          ) {
+          // Fallback: intersect the pick ray with the bounding sphere.
+          if (!Cesium.defined(pickedPosition) && Cesium.defined(bs)) {
             const ray = viewer.camera.getPickRay(click.position);
             if (Cesium.defined(ray)) {
-              const bsCenter = currentTileset.boundingSphere.center;
-              if (Cesium.Cartesian3.magnitudeSquared(bsCenter) > 1.0) {
-                const dist = Cesium.Cartesian3.distance(ray.origin, bsCenter);
-                pickedPosition = Cesium.Ray.getPoint(ray, dist);
+              const intersection = Cesium.IntersectionTests.raySphere(ray, bs);
+              if (Cesium.defined(intersection) && intersection.start > 1.0) {
+                // Camera outside sphere — use the near hit
+                pickedPosition = Cesium.Ray.getPoint(ray, intersection.start);
+              } else {
+                // Camera inside the sphere or at its surface — project the
+                // sphere center onto the ray to get a point roughly in the
+                // middle of the model along the view direction.
+                const toCenter = Cesium.Cartesian3.subtract(
+                  bs.center,
+                  ray.origin,
+                  new Cesium.Cartesian3(),
+                );
+                const projDist = Cesium.Cartesian3.dot(toCenter, ray.direction);
+                pickedPosition = Cesium.Ray.getPoint(ray, Math.max(projDist, 1.0));
               }
             }
           }

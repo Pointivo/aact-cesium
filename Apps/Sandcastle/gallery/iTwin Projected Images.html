@@ -250,13 +250,22 @@
 
         // --- State tracking ---
         let currentTileset;
+        let depthSourceTileset;
         let currentCollection;
         let currentHandler;
         const currentClickHandler = undefined;
         let preRenderListener;
 
+        function clearDepthSource() {
+          if (Cesium.defined(depthSourceTileset)) {
+            scene.primitives.remove(depthSourceTileset);
+            depthSourceTileset = undefined;
+          }
+        }
+
         function clearTileset() {
           unlockOrbit();
+          clearDepthSource();
           if (Cesium.defined(currentTileset)) {
             scene.primitives.remove(currentTileset);
             currentTileset = undefined;
@@ -344,6 +353,7 @@
             "Terrain3DTiles",
             "GS_3DT",
             "GaussianSplats",
+            "GS_PLY",
           ];
 
           async function hasTiles(iTwinId) {
@@ -396,6 +406,14 @@
           "Terrain3DTiles",
           "GS_3DT",
           "GaussianSplats",
+          "GS_PLY",
+        ];
+        const splatTypes = ["GS_3DT", "GaussianSplats", "GS_PLY"];
+        const depthSourceTypes = [
+          "Cesium3DTiles",
+          "RealityMesh3DTiles",
+          "PNTS",
+          "Terrain3DTiles",
         ];
         let currentMeshItems = [];
         let currentCCItems = [];
@@ -489,14 +507,55 @@
 
           log(`Loading 3D Tiles: ${item.displayName}...`);
           try {
+            // Gaussian splat tilesets use REPLACE refinement: only the
+            // deepest tiles that meet the SSE threshold are rendered.
+            // Keep the default SSE (16) so that distant regions are
+            // served by coarser parent tiles while nearby regions get
+            // max-detail leaves — this gives full-model coverage.
+            // Disable foveated deferral so peripheral tiles load
+            // promptly, and use a generous cache so tiles are not
+            // evicted under memory pressure.
+            const tilesetOptions = splatTypes.includes(item.type)
+              ? {
+                  foveatedScreenSpaceError: false,
+                  cacheBytes: 1024 * 1024 * 1024,
+                  maximumCacheOverflowBytes: 512 * 1024 * 1024,
+                }
+              : {};
             currentTileset = await Cesium.ITwinData.createTilesetForRealityDataId({
               iTwinId: selectedITwinId,
               realityDataId: item.id,
               type: item.type,
               rootDocument: item.rootDocument,
+              tilesetOptions,
             });
             scene.primitives.add(currentTileset);
             log(`  ✓ Loaded ${item.displayName}`);
+
+            // If this is a Gaussian splat, load a mesh as an invisible depth
+            // source so that pickPosition() works for double-click orbit.
+            if (splatTypes.includes(item.type)) {
+              const depthItem = currentMeshItems.find((m) =>
+                depthSourceTypes.includes(m.type),
+              );
+              if (depthItem) {
+                try {
+                  depthSourceTileset =
+                    await Cesium.ITwinData.createTilesetForRealityDataId({
+                      iTwinId: selectedITwinId,
+                      realityDataId: depthItem.id,
+                      type: depthItem.type,
+                      rootDocument: depthItem.rootDocument,
+                    });
+                  depthSourceTileset.show = false;
+                  depthSourceTileset.preloadWhenHidden = true;
+                  scene.primitives.add(depthSourceTileset);
+                  log(`  ✓ Depth source: ${depthItem.displayName} (hidden)`);
+                } catch (depthErr) {
+                  log(`  ⚠ Could not load depth source: ${depthErr.message}`);
+                }
+              }
+            }
             viewer.flyTo(currentTileset).then(function (success) {
               if (!success || !Cesium.defined(currentTileset)) {
                 return;
@@ -1038,7 +1097,34 @@
           }
 
           // 2. Otherwise, pick a 3D position and set it as the orbit center
-          const pickedPosition = scene.pickPosition(click.position);
+          let pickedPosition = scene.pickPosition(click.position);
+
+          // Fallback for geometry that doesn't write depth (e.g. Gaussian splats):
+          // temporarily show the hidden depth-source mesh, render one frame to
+          // populate the depth buffer, then pick from that.
+          if (!Cesium.defined(pickedPosition) && Cesium.defined(depthSourceTileset)) {
+            depthSourceTileset.show = true;
+            scene.render(viewer.clock.currentTime);
+            pickedPosition = scene.pickPosition(click.position);
+            depthSourceTileset.show = false;
+          }
+
+          // Final fallback: ray at bounding sphere center distance
+          if (
+            !Cesium.defined(pickedPosition) &&
+            Cesium.defined(currentTileset) &&
+            Cesium.defined(currentTileset.boundingSphere)
+          ) {
+            const ray = viewer.camera.getPickRay(click.position);
+            if (Cesium.defined(ray)) {
+              const bsCenter = currentTileset.boundingSphere.center;
+              if (Cesium.Cartesian3.magnitudeSquared(bsCenter) > 1.0) {
+                const dist = Cesium.Cartesian3.distance(ray.origin, bsCenter);
+                pickedPosition = Cesium.Ray.getPoint(ray, dist);
+              }
+            }
+          }
+
           if (!Cesium.defined(pickedPosition)) {
             return;
           }

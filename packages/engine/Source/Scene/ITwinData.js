@@ -141,17 +141,51 @@ ITwinData.createTilesetForRealityDataId = async function ({
     ITwinPlatform.RealityDataType.Terrain3DTiles,
     ITwinPlatform.RealityDataType.GaussianSplat3DTiles,
     ITwinPlatform.RealityDataType.GaussianSplats,
+    ITwinPlatform.RealityDataType.GaussianSplatPLY,
   ];
 
   if (!supportedRealityDataTypes.includes(type)) {
     throw new RuntimeError(`Reality data type is not a mesh type: ${type}`);
   }
 
-  const tilesetAccessUrl = await ITwinPlatform.getRealityDataURL(
-    iTwinId,
-    realityDataId,
-    rootDocument,
-  );
+  let tilesetAccessUrl;
+  if (defined(rootDocument)) {
+    tilesetAccessUrl = await ITwinPlatform.getRealityDataURL(
+      iTwinId,
+      realityDataId,
+      rootDocument,
+    );
+  } else {
+    // rootDocument not set in metadata — probe for common root documents.
+    const containerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+      iTwinId,
+      realityDataId,
+    );
+    const candidates = ["tileset.json", "Tileset.json"];
+    let found = false;
+    for (const candidate of candidates) {
+      const candidateUrlObj = new URL(containerUrl);
+      candidateUrlObj.pathname = `${candidateUrlObj.pathname}/${candidate}`;
+      const testUrl = candidateUrlObj.toString();
+      try {
+        const testResource = new Resource({ url: testUrl });
+        const text = await testResource.fetchText();
+        if (defined(text) && text.length > 0) {
+          tilesetAccessUrl = testUrl;
+          found = true;
+          break;
+        }
+      } catch (e) {
+        // not found, try next
+      }
+    }
+    if (!found) {
+      throw new RuntimeError(
+        `Could not find tileset.json in container for reality data ${realityDataId}. ` +
+          `Tried: ${candidates.join(", ")}`,
+      );
+    }
+  }
 
   // The maximum screen space error was defined to default to 4 for
   // reality data tilesets, because they did not show the expected

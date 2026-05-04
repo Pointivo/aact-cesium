@@ -1,6 +1,7 @@
 import {
   ITwinPlatform,
   RuntimeError,
+  Resource,
   Cesium3DTileset,
   ITwinData,
   GeoJsonDataSource,
@@ -131,10 +132,12 @@ describe("ITwinData", () => {
   describe("createTilesetForRealityDataId", () => {
     let getMetadataSpy;
     let getUrlSpy;
+    let getContainerUrlSpy;
     let tilesetSpy;
     beforeEach(() => {
       getMetadataSpy = spyOn(ITwinPlatform, "getRealityDataMetadata");
       getUrlSpy = spyOn(ITwinPlatform, "getRealityDataURL");
+      getContainerUrlSpy = spyOn(ITwinPlatform, "getRealityDataContainerUrl");
       tilesetSpy = spyOn(Cesium3DTileset, "fromUrl");
     });
 
@@ -213,6 +216,59 @@ describe("ITwinData", () => {
         "reality-data-id-1",
         "root/document/path.json",
       );
+    });
+
+    it("probes container for tileset.json when metadata has no rootDocument", async () => {
+      getMetadataSpy.and.resolveTo({
+        iModelId: "itwin-id-1",
+        id: "reality-data-id-1",
+        type: ITwinPlatform.RealityDataType.GaussianSplats,
+        rootDocument: undefined,
+      });
+      getContainerUrlSpy.and.resolveTo(
+        "https://example.com/container?sas=token",
+      );
+      spyOn(Resource.prototype, "fetchText").and.resolveTo(
+        '{"root":{"children":[]}}',
+      );
+
+      await ITwinData.createTilesetForRealityDataId({
+        iTwinId: "itwin-id-1",
+        realityDataId: "reality-data-id-1",
+        type: ITwinPlatform.RealityDataType.GaussianSplats,
+        rootDocument: undefined,
+      });
+
+      expect(getContainerUrlSpy).toHaveBeenCalledOnceWith(
+        "itwin-id-1",
+        "reality-data-id-1",
+      );
+      expect(getUrlSpy).not.toHaveBeenCalled();
+      expect(tilesetSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects when metadata has no rootDocument and probing fails", async () => {
+      getMetadataSpy.and.resolveTo({
+        iModelId: "itwin-id-1",
+        id: "reality-data-id-1",
+        type: ITwinPlatform.RealityDataType.GaussianSplats,
+        rootDocument: undefined,
+      });
+      getContainerUrlSpy.and.resolveTo(
+        "https://example.com/container?sas=token",
+      );
+      spyOn(Resource.prototype, "fetchText").and.rejectWith(
+        new Error("404 Not Found"),
+      );
+
+      await expectAsync(
+        ITwinData.createTilesetForRealityDataId({
+          iTwinId: "itwin-id-1",
+          realityDataId: "reality-data-id-1",
+          type: ITwinPlatform.RealityDataType.GaussianSplats,
+          rootDocument: undefined,
+        }),
+      ).toBeRejectedWithError(RuntimeError, /Could not find tileset\.json/);
     });
 
     it("creates a tileset from the constructed blob url", async () => {

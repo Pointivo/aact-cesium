@@ -663,11 +663,11 @@ ProjectedImagePrimitive.prototype.update = function (frameState) {
   return material;
 }`,
           },
-          translucent: this._alpha < 1.0,
+          translucent: true,
         }),
         faceForward: true,
         flat: true, // no lighting — show original image colors
-        translucent: this._alpha < 1.0,
+        translucent: true,
         renderState: {
           depthTest: {
             enabled: false,

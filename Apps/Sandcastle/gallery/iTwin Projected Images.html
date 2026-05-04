@@ -298,6 +298,67 @@
               const splats = gsp._numSplats;
               const splatK = splats > 0 ? `${(splats / 1000).toFixed(0)}K` : "0";
               text += `  Splats: ${splatK}`;
+
+              // Depth breakdown: walk tile tree once per frame
+              const depthCounts = []; // [{ total, selected, loaded }]
+              let maxDepth = 0;
+              function walkTile(tile, depth) {
+                if (!depthCounts[depth]) {
+                  depthCounts[depth] = { total: 0, sel: 0, loaded: 0 };
+                }
+                depthCounts[depth].total++;
+                if (tile.contentReady && tile.hasRenderableContent) {
+                  depthCounts[depth].loaded++;
+                }
+                if (depth > maxDepth) {
+                  maxDepth = depth;
+                }
+                if (tile.children) {
+                  for (const child of tile.children) {
+                    walkTile(child, depth + 1);
+                  }
+                }
+              }
+              if (Cesium.defined(tileset.root)) {
+                walkTile(tileset.root, 0);
+              }
+              for (const tile of tileset._selectedTiles) {
+                let depth = 0;
+                let t = tile;
+                while (t.parent) {
+                  depth++;
+                  t = t.parent;
+                }
+                if (depthCounts[depth]) {
+                  depthCounts[depth].sel++;
+                }
+              }
+
+              // Find deepest level with actual content (skip empty levels)
+              let deepestContent = 0;
+              let deepestSelected = 0;
+              for (let d = 0; d <= maxDepth; d++) {
+                if (depthCounts[d] && depthCounts[d].loaded > 0) {
+                  deepestContent = d;
+                }
+                if (depthCounts[d] && depthCounts[d].sel > 0) {
+                  deepestSelected = d;
+                }
+              }
+
+              const leafInfo = depthCounts[deepestContent];
+              const atMax = deepestSelected >= deepestContent;
+              const budgetThrottled = gsp._splatBudgetSSEScale > 1;
+
+              text += `\nDepth: ${deepestSelected}/${maxDepth}`;
+              if (leafInfo) {
+                text += `  Leaves: ${leafInfo.sel}/${leafInfo.total} vis ${leafInfo.loaded} loaded`;
+              }
+              if (budgetThrottled) {
+                text += `\n⚠ Budget limited (${gsp._splatBudgetSSEScale.toFixed(1)}× SSE)`;
+              } else if (atMax && pending === 0 && processing === 0) {
+                text += `  ✓ Max detail`;
+              }
             }
             lodPanel.textContent = text;
           });

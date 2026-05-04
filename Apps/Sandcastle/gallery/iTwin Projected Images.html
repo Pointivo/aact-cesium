@@ -681,10 +681,21 @@
                     });
                   depthSourceTileset.show = false;
                   depthSourceTileset.preloadWhenHidden = true;
-                  // Limit memory — depth source only needs geometry, not textures.
-                  depthSourceTileset.cacheBytes = 128 * 1024 * 1024;
-                  depthSourceTileset.maximumCacheOverflowBytes = 64 * 1024 * 1024;
                   scene.primitives.add(depthSourceTileset);
+                  // With requestRenderMode, preload traversal only runs
+                  // during renders.  Request periodic renders until the
+                  // depth mesh finishes its initial tile loading.
+                  const depthLoadInterval = setInterval(() => {
+                    if (
+                      !Cesium.defined(depthSourceTileset) ||
+                      depthSourceTileset.isDestroyed() ||
+                      depthSourceTileset.tilesLoaded
+                    ) {
+                      clearInterval(depthLoadInterval);
+                      return;
+                    }
+                    scene.requestRender();
+                  }, 500);
                   log(`  ✓ Depth source: ${depthItem.displayName} (hidden)`);
                 } catch (depthErr) {
                   log(`  ⚠ Could not load depth source: ${depthErr.message}`);

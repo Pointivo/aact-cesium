@@ -1,0 +1,1429 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no"
+    />
+    <meta
+      name="description"
+      content="Load 3D Tiles and projected images from an iTwin reality data service."
+    />
+    <meta name="cesium-sandcastle-labels" content="Development" />
+    <title>iTwin Projected Images</title>
+    <script type="text/javascript" src="../Sandcastle-header.js"></script>
+    <script
+      type="text/javascript"
+      src="../../../Build/CesiumUnminified/Cesium.js"
+      nomodule
+    ></script>
+    <script type="module" src="../load-cesium-es6.js"></script>
+  </head>
+  <body class="sandcastle-loading" data-sandcastle-bucket="bucket-requirejs.html">
+    <style>
+      @import url(../templates/bucket.css);
+      #statusPanel {
+        position: absolute;
+        bottom: 40px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 6px;
+        font: 13px monospace;
+        z-index: 100;
+        max-width: 400px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+      #lodPanel {
+        position: absolute;
+        bottom: 40px;
+        right: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        color: #ccc;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font: 12px monospace;
+        z-index: 100;
+        white-space: pre;
+        pointer-events: none;
+        display: none;
+      }
+    </style>
+    <div id="cesiumContainer" class="fullSize"></div>
+    <div id="loadingOverlay"><h1>Loading...</h1></div>
+    <div id="toolbar"></div>
+    <div id="statusPanel">Initializing...</div>
+    <div id="lodPanel"></div>
+    <!-- Blocking login overlay -->
+    <div
+      id="loginOverlay"
+      style="
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.85);
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        color: #fff;
+        font-family: sans-serif;
+      "
+    >
+      <h2 style="margin-bottom: 16px">iTwin Projected Images</h2>
+      <p style="margin-bottom: 24px; color: #aaa">
+        Sign in with your Bentley account to continue
+      </p>
+      <button
+        id="loginBtn"
+        style="
+          font: 16px sans-serif;
+          padding: 12px 32px;
+          cursor: pointer;
+          background: #4a90d9;
+          color: #fff;
+          border: none;
+          border-radius: 8px;
+        "
+      >
+        Sign In
+      </button>
+      <p id="loginStatus" style="margin-top: 12px; color: #888; font: 12px monospace"></p>
+    </div>
+    <script id="cesium_sandcastle_script">
+      window.startup = async function (Cesium) {
+        "use strict";
+        //Sandcastle_Begin
+
+        // --- Config ---
+        const IIIF_BASE_URL = "https://iiif.aact-platform-dev.pointivo.com";
+        const IMS_AUTHORITY = "https://ims.bentley.com";
+        const AUTHORIZE_URL = `${IMS_AUTHORITY}/connect/authorize`;
+        const TOKEN_URL = `${IMS_AUTHORITY}/connect/token`;
+        const CLIENT_ID = "spa-kq3hJXgDnc7C86yCjeMV3CA38";
+        const SCOPES = "itwin-platform";
+        const REDIRECT_URI = window.location.origin + window.location.pathname;
+
+        // --- OAuth2 PKCE helpers ---
+        function generateCodeVerifier() {
+          const array = new Uint8Array(64);
+          crypto.getRandomValues(array);
+          return btoa(String.fromCharCode(...array))
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_")
+            .replace(/=/g, "");
+        }
+
+        async function generateCodeChallenge(verifier) {
+          const data = new TextEncoder().encode(verifier);
+          const hash = await crypto.subtle.digest("SHA-256", data);
+          return btoa(String.fromCharCode(...new Uint8Array(hash)))
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_")
+            .replace(/=/g, "");
+        }
+
+        function getStoredToken() {
+          try {
+            const data = JSON.parse(sessionStorage.getItem("itwin_token"));
+            if (data && data.access_token && data.expires_at > Date.now() / 1000) {
+              return data;
+            }
+          } catch {
+            // ignore
+          }
+          return null;
+        }
+
+        async function startLogin() {
+          const codeVerifier = generateCodeVerifier();
+          const codeChallenge = await generateCodeChallenge(codeVerifier);
+          const state = generateCodeVerifier().substring(0, 32);
+
+          sessionStorage.setItem("pkce_verifier", codeVerifier);
+          sessionStorage.setItem("pkce_state", state);
+
+          const params = new URLSearchParams({
+            client_id: CLIENT_ID,
+            response_type: "code",
+            redirect_uri: REDIRECT_URI,
+            scope: SCOPES,
+            state: state,
+            code_challenge: codeChallenge,
+            code_challenge_method: "S256",
+            response_mode: "query",
+          });
+
+          window.location.href = `${AUTHORIZE_URL}?${params.toString()}`;
+        }
+
+        async function handleAuthCallback() {
+          const params = new URLSearchParams(window.location.search);
+          const code = params.get("code");
+          const state = params.get("state");
+
+          if (!code || !state) {
+            return false;
+          }
+
+          const savedState = sessionStorage.getItem("pkce_state");
+          const codeVerifier = sessionStorage.getItem("pkce_verifier");
+
+          if (state !== savedState || !codeVerifier) {
+            return false;
+          }
+
+          try {
+            const resp = await fetch(TOKEN_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "authorization_code",
+                client_id: CLIENT_ID,
+                code: code,
+                redirect_uri: REDIRECT_URI,
+                code_verifier: codeVerifier,
+              }),
+            });
+
+            if (!resp.ok) {
+              throw new Error(`Token exchange failed: ${resp.status}`);
+            }
+
+            const tokenData = await resp.json();
+            tokenData.expires_at = Date.now() / 1000 + (tokenData.expires_in || 3600);
+            sessionStorage.setItem("itwin_token", JSON.stringify(tokenData));
+
+            sessionStorage.removeItem("pkce_verifier");
+            sessionStorage.removeItem("pkce_state");
+
+            window.location.href = REDIRECT_URI;
+            return true;
+          } catch (e) {
+            console.error("Auth failed:", e);
+            return false;
+          }
+        }
+
+        // --- Handle OAuth callback or require login ---
+        await handleAuthCallback();
+
+        const storedToken = getStoredToken();
+        if (!storedToken) {
+          // Hide Sandcastle loading overlay so login is clickable
+          document.body.classList.remove("sandcastle-loading");
+          const loadingOverlay = document.getElementById("loadingOverlay");
+          if (loadingOverlay) {
+            loadingOverlay.style.display = "none";
+          }
+          document.getElementById("loginOverlay").style.display = "flex";
+          document.getElementById("loginBtn").addEventListener("click", startLogin);
+          return; // Stop here — user must log in
+        }
+
+        // Authenticated — hide overlay, set platform token
+        document.getElementById("loginOverlay").style.display = "none";
+        Cesium.ITwinPlatform.defaultAccessToken = storedToken.access_token;
+
+        // --- Persist selections across reloads ---
+        const PREFS_KEY = "cesium_itwin_demo_prefs";
+        function loadPrefs() {
+          try {
+            return JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+          } catch {
+            return {};
+          }
+        }
+        function savePrefs(patch) {
+          const prefs = { ...loadPrefs(), ...patch };
+          localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+        }
+        const savedPrefs = loadPrefs();
+
+        let selectedITwinId;
+
+        const statusPanel = document.getElementById("statusPanel");
+        function log(msg) {
+          console.log(msg);
+          statusPanel.textContent += `\n${msg}`;
+        }
+
+        const viewer = new Cesium.Viewer("cesiumContainer", {
+          infoBox: false,
+          selectionIndicator: false,
+          terrain: Cesium.Terrain.fromWorldTerrain(),
+          requestRenderMode: true,
+          maximumRenderTimeChange: Infinity,
+        });
+        window.__viewer = viewer;
+        const scene = viewer.scene;
+
+        // --- LOD indicator ---
+        const lodPanel = document.getElementById("lodPanel");
+        let lodRemoveListener;
+
+        function startLodIndicator(tileset) {
+          stopLodIndicator();
+          lodPanel.style.display = "block";
+          lodRemoveListener = scene.postRender.addEventListener(() => {
+            if (!Cesium.defined(currentTileset) || currentTileset.isDestroyed()) {
+              lodPanel.style.display = "none";
+              return;
+            }
+            const stats = tileset.statistics;
+            const pending = stats.numberOfPendingRequests;
+            const processing = stats.numberOfTilesProcessing;
+            const selected = stats.selected;
+            const total = stats.numberOfTilesTotal;
+            const loaded = stats.numberOfTilesWithContentReady;
+            const memMB = (
+              (stats.geometryByteLength + stats.texturesByteLength) /
+              1048576
+            ).toFixed(1);
+
+            let text = `Tiles: ${selected}/${total} sel`;
+            text += `  ${loaded} loaded`;
+            if (pending > 0 || processing > 0) {
+              text += `  ⏳ ${pending} pending ${processing} proc`;
+            }
+            text += `\nMem: ${memMB} MB`;
+
+            const gsp = tileset.gaussianSplatPrimitive;
+            if (Cesium.defined(gsp)) {
+              const splats = gsp._numSplats;
+              const splatK = splats > 0 ? `${(splats / 1000).toFixed(0)}K` : "0";
+              text += `  Splats: ${splatK}`;
+
+              // Depth breakdown: walk tile tree once per frame
+              const depthCounts = []; // [{ total, selected, loaded }]
+              let maxDepth = 0;
+              function walkTile(tile, depth) {
+                if (!depthCounts[depth]) {
+                  depthCounts[depth] = { total: 0, sel: 0, loaded: 0 };
+                }
+                depthCounts[depth].total++;
+                if (tile.contentReady && tile.hasRenderableContent) {
+                  depthCounts[depth].loaded++;
+                }
+                if (depth > maxDepth) {
+                  maxDepth = depth;
+                }
+                if (tile.children) {
+                  for (const child of tile.children) {
+                    walkTile(child, depth + 1);
+                  }
+                }
+              }
+              if (Cesium.defined(tileset.root)) {
+                walkTile(tileset.root, 0);
+              }
+              for (const tile of tileset._selectedTiles) {
+                let depth = 0;
+                let t = tile;
+                while (t.parent) {
+                  depth++;
+                  t = t.parent;
+                }
+                if (depthCounts[depth]) {
+                  depthCounts[depth].sel++;
+                }
+              }
+
+              // Find deepest level with actual content (skip empty levels)
+              let deepestContent = 0;
+              let deepestSelected = 0;
+              for (let d = 0; d <= maxDepth; d++) {
+                if (depthCounts[d] && depthCounts[d].loaded > 0) {
+                  deepestContent = d;
+                }
+                if (depthCounts[d] && depthCounts[d].sel > 0) {
+                  deepestSelected = d;
+                }
+              }
+
+              const leafInfo = depthCounts[deepestContent];
+              const atMax = deepestSelected >= deepestContent;
+              const budgetThrottled = gsp._splatBudgetSSEScale > 1;
+
+              text += `\nDepth: ${deepestSelected}/${maxDepth}`;
+              if (leafInfo) {
+                text += `  Leaves: ${leafInfo.sel}/${leafInfo.total} vis ${leafInfo.loaded} loaded`;
+              }
+              if (budgetThrottled) {
+                text += `\n⚠ Budget limited (${gsp._splatBudgetSSEScale.toFixed(1)}× SSE)`;
+              } else if (atMax && pending === 0 && processing === 0) {
+                text += `  ✓ Max detail`;
+              }
+            }
+            lodPanel.textContent = text;
+          });
+        }
+
+        function stopLodIndicator() {
+          if (Cesium.defined(lodRemoveListener)) {
+            lodRemoveListener();
+            lodRemoveListener = undefined;
+          }
+          lodPanel.style.display = "none";
+          lodPanel.textContent = "";
+        }
+
+        // --- State tracking ---
+        let currentTileset;
+        let depthSourceTileset;
+        let currentCollection;
+        let currentHandler;
+        const currentClickHandler = undefined;
+        let preRenderListener;
+
+        function clearDepthSource() {
+          if (Cesium.defined(depthSourceTileset)) {
+            scene.primitives.remove(depthSourceTileset);
+            depthSourceTileset = undefined;
+          }
+        }
+
+        function clearTileset() {
+          unlockOrbit();
+          clearDepthSource();
+          stopLodIndicator();
+          if (Cesium.defined(currentTileset)) {
+            scene.primitives.remove(currentTileset);
+            currentTileset = undefined;
+          }
+          // Restore default zoom factor when switching tilesets.
+          scene.screenSpaceCameraController.zoomFactor = 5.0;
+        }
+
+        function clearCollection() {
+          if (Cesium.defined(preRenderListener)) {
+            preRenderListener();
+            preRenderListener = undefined;
+          }
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.destroy();
+            currentHandler = undefined;
+          }
+          if (Cesium.defined(currentCollection)) {
+            scene.primitives.remove(currentCollection);
+            currentCollection = undefined;
+          }
+        }
+
+        // --- Fetch iTwins and build dynamic dropdowns ---
+        const toolbar = document.getElementById("toolbar");
+
+        // Create native <select> elements for dynamic population
+        function createSelect(label) {
+          const container = document.createElement("span");
+          container.style.cssText = "margin-right: 8px;";
+          const lbl = document.createElement("label");
+          lbl.textContent = `${label}: `;
+          lbl.style.cssText = "color: #fff; font: 13px sans-serif;";
+          const sel = document.createElement("select");
+          sel.style.cssText = "font: 13px sans-serif; padding: 2px 4px;";
+          container.appendChild(lbl);
+          container.appendChild(sel);
+          toolbar.insertBefore(container, toolbar.firstChild);
+          return sel;
+        }
+
+        const ccSelect = createSelect("CC Orientations");
+        const tilesetSelect = createSelect("3D Tiles");
+        const iTwinSelect = createSelect("iTwin");
+
+        // --- Fetch and populate iTwins ---
+        log("Fetching iTwins...");
+        try {
+          const allITwins = [];
+          let nextUrl = `${Cesium.ITwinPlatform.apiEndpoint}itwins?$top=100`;
+          const iTwinHeaders = {
+            Authorization: Cesium.ITwinPlatform._getAuthorizationHeader(),
+            Accept: "application/vnd.bentley.itwin-platform.v2+json",
+            Prefer: "return=representation",
+          };
+
+          while (nextUrl) {
+            const resource = new Cesium.Resource({
+              url: nextUrl,
+              headers: iTwinHeaders,
+            });
+            const resp = await resource.fetchJson();
+            const page = resp.iTwins || [];
+            allITwins.push(...page);
+            nextUrl = resp._links && resp._links.next ? resp._links.next.href : null;
+          }
+
+          const iTwins = allITwins;
+          log(`Found ${iTwins.length} iTwins — checking for 3D tiles…`);
+
+          const noneOpt = document.createElement("option");
+          noneOpt.value = "";
+          noneOpt.textContent = "(loading — checking for 3D tiles…)";
+          iTwinSelect.appendChild(noneOpt);
+
+          // Manual ID entry option (always available)
+          const customOpt = document.createElement("option");
+          customOpt.value = "__custom__";
+          customOpt.textContent = "Enter ID manually…";
+          iTwinSelect.appendChild(customOpt);
+
+          // Check each iTwin for 3D tiles reality data in parallel batches
+          const tileTypes = [
+            "Cesium3DTiles",
+            "RealityMesh3DTiles",
+            "PNTS",
+            "Terrain3DTiles",
+            "GS_3DT",
+            "GaussianSplats",
+            "GS_PLY",
+          ];
+
+          async function hasTiles(iTwinId) {
+            try {
+              const data = await Cesium.ITwinPlatform.listRealityData(iTwinId, {
+                types: tileTypes,
+              });
+              return data.length > 0;
+            } catch {
+              return false;
+            }
+          }
+
+          // Process in batches of 10 to avoid flooding requests
+          const BATCH_SIZE = 10;
+          let matchCount = 0;
+          for (let i = 0; i < iTwins.length; i += BATCH_SIZE) {
+            const batch = iTwins.slice(i, i + BATCH_SIZE);
+            const results = await Promise.all(
+              batch.map(async (itwin) => ({
+                itwin,
+                has: await hasTiles(itwin.id),
+              })),
+            );
+            for (const { itwin, has } of results) {
+              if (has) {
+                matchCount++;
+                const opt = document.createElement("option");
+                opt.value = itwin.id;
+                opt.textContent = itwin.displayName || itwin.number || itwin.id;
+                iTwinSelect.insertBefore(opt, customOpt);
+              }
+            }
+          }
+
+          noneOpt.textContent = `(select an iTwin — ${matchCount} with 3D tiles)`;
+          log(`Found ${matchCount} iTwins with 3D tiles`);
+
+          // Auto-restore saved iTwin selection (deferred to end of script)
+        } catch (e) {
+          log(`Error fetching iTwins: ${e.message}`);
+          console.error(e);
+        }
+
+        // --- On iTwin selection, load reality data ---
+        const meshTypes = [
+          "Cesium3DTiles",
+          "RealityMesh3DTiles",
+          "PNTS",
+          "Terrain3DTiles",
+          "GS_3DT",
+          "GaussianSplats",
+          "GS_PLY",
+        ];
+        const splatTypes = ["GS_3DT", "GaussianSplats", "GS_PLY"];
+        // Only meshes are dense enough for reliable depth picking.
+        // Point clouds (PNTS) are too sparse — picks fall through to the globe.
+        const depthSourceTypes = [
+          "Cesium3DTiles",
+          "RealityMesh3DTiles",
+          "Terrain3DTiles",
+        ];
+        let currentMeshItems = [];
+        let currentCCItems = [];
+        let currentImageItems = [];
+
+        async function onITwinSelected(iTwinId) {
+          clearTileset();
+          clearCollection();
+          tilesetSelect.innerHTML = "";
+          ccSelect.innerHTML = "";
+          currentMeshItems = [];
+          currentCCItems = [];
+          currentImageItems = [];
+          selectedITwinId = iTwinId;
+          savePrefs({ iTwinId: iTwinId });
+
+          if (!iTwinId) {
+            return;
+          }
+
+          log(`Loading reality data for iTwin ${iTwinId}...`);
+          try {
+            const allData = await Cesium.ITwinPlatform.listRealityData(iTwinId);
+            log(`Found ${allData.length} reality data items`);
+
+            currentMeshItems = allData.filter((rd) => meshTypes.includes(rd.type));
+            const csItems = allData.filter((rd) => rd.type === "ContextScene");
+            const ccItems = allData.filter((rd) => rd.type === "CCOrientations");
+            // Prefer ContextScene (has pose data) over CCOrientations (may be input-only)
+            currentCCItems = [...csItems, ...ccItems];
+            currentImageItems = allData.filter((rd) => rd.type === "CCImageCollection");
+
+            // Populate 3D Tiles dropdown
+            const tNone = document.createElement("option");
+            tNone.value = "";
+            tNone.textContent = "(none)";
+            tilesetSelect.appendChild(tNone);
+            for (const item of currentMeshItems) {
+              const opt = document.createElement("option");
+              opt.value = item.id;
+              opt.textContent = item.displayName;
+              tilesetSelect.appendChild(opt);
+            }
+
+            // Populate CC Orientations dropdown
+            const cNone = document.createElement("option");
+            cNone.value = "";
+            cNone.textContent = "(no orientations)";
+            ccSelect.appendChild(cNone);
+            for (const item of currentCCItems) {
+              const opt = document.createElement("option");
+              opt.value = item.id;
+              opt.textContent = `${item.displayName} [${item.type}]`;
+              ccSelect.appendChild(opt);
+            }
+
+            log(
+              `  ${currentMeshItems.length} mesh, ${csItems.length} ContextScene, ${ccItems.length} CCOrientations, ${currentImageItems.length} image collections`,
+            );
+          } catch (e) {
+            log(`Error listing reality data: ${e.message}`);
+            console.error(e);
+          }
+        }
+
+        iTwinSelect.addEventListener("change", function () {
+          if (this.value === "__custom__") {
+            const id = prompt("Enter iTwin ID:");
+            if (id && id.trim()) {
+              onITwinSelected(id.trim());
+            } else {
+              this.value = "";
+            }
+          } else {
+            onITwinSelected(this.value);
+          }
+        });
+
+        // --- On 3D Tiles selection ---
+        tilesetSelect.addEventListener("change", async function () {
+          clearTileset();
+          const itemId = this.value;
+          savePrefs({ tilesetId: itemId });
+          if (!itemId || !selectedITwinId) {
+            return;
+          }
+          const item = currentMeshItems.find((m) => m.id === itemId);
+          if (!item) {
+            return;
+          }
+
+          log(`Loading 3D Tiles: ${item.displayName}...`);
+          try {
+            // Gaussian splat tilesets use REPLACE refinement: only the
+            // deepest tiles that meet the SSE threshold are rendered.
+            // Keep the default SSE (16) so that distant regions are
+            // served by coarser parent tiles while nearby regions get
+            // max-detail leaves — this gives full-model coverage.
+            // Disable foveated deferral so peripheral tiles load
+            // promptly, and use a generous cache so tiles are not
+            // evicted under memory pressure.
+            const tilesetOptions = splatTypes.includes(item.type)
+              ? {
+                  foveatedScreenSpaceError: false,
+                  cacheBytes: 1024 * 1024 * 1024,
+                  maximumCacheOverflowBytes: 512 * 1024 * 1024,
+                }
+              : {};
+            currentTileset = await Cesium.ITwinData.createTilesetForRealityDataId({
+              iTwinId: selectedITwinId,
+              realityDataId: item.id,
+              type: item.type,
+              rootDocument: item.rootDocument,
+              tilesetOptions,
+            });
+            scene.primitives.add(currentTileset);
+            startLodIndicator(currentTileset);
+            log(`  ✓ Loaded ${item.displayName}`);
+
+            // If this is a Gaussian splat, load a mesh as an invisible depth
+            // source so that pickPosition() works for double-click orbit.
+            if (splatTypes.includes(item.type)) {
+              const depthItem = currentMeshItems.find((m) =>
+                depthSourceTypes.includes(m.type),
+              );
+              if (depthItem) {
+                try {
+                  depthSourceTileset =
+                    await Cesium.ITwinData.createTilesetForRealityDataId({
+                      iTwinId: selectedITwinId,
+                      realityDataId: depthItem.id,
+                      type: depthItem.type,
+                      rootDocument: depthItem.rootDocument,
+                    });
+                  depthSourceTileset.show = false;
+                  depthSourceTileset.preloadWhenHidden = true;
+                  scene.primitives.add(depthSourceTileset);
+                  // With requestRenderMode, preload traversal only runs
+                  // during renders.  Request periodic renders until the
+                  // depth mesh finishes its initial tile loading.
+                  const depthLoadInterval = setInterval(() => {
+                    if (
+                      !Cesium.defined(depthSourceTileset) ||
+                      depthSourceTileset.isDestroyed() ||
+                      depthSourceTileset.tilesLoaded
+                    ) {
+                      clearInterval(depthLoadInterval);
+                      return;
+                    }
+                    scene.requestRender();
+                  }, 500);
+                  log(`  ✓ Depth source: ${depthItem.displayName} (hidden)`);
+                } catch (depthErr) {
+                  log(`  ⚠ Could not load depth source: ${depthErr.message}`);
+                }
+              }
+            }
+            viewer.flyTo(currentTileset).then(function (success) {
+              if (!success || !Cesium.defined(currentTileset)) {
+                return;
+              }
+
+              // Gaussian splat models are typically small (hundreds of
+              // meters).  Reduce the zoom factor so scroll-wheel steps
+              // are proportional to the model, not the globe.
+              if (splatTypes.includes(item.type)) {
+                scene.screenSpaceCameraController.zoomFactor = 2.0;
+              }
+
+              const bsCenter = currentTileset.boundingSphere.center;
+              // Guard against tileset reporting an uncomputed (origin) bounding sphere
+              if (Cesium.Cartesian3.magnitudeSquared(bsCenter) < 1.0) {
+                return;
+              }
+              Cesium.Cartesian3.clone(bsCenter, focalPoint);
+              const range = Cesium.Cartesian3.distance(
+                viewer.camera.positionWC,
+                focalPoint,
+              );
+              viewer.camera.lookAt(
+                focalPoint,
+                new Cesium.HeadingPitchRange(
+                  viewer.camera.heading,
+                  viewer.camera.pitch,
+                  range,
+                ),
+              );
+              orbitActive = true;
+              activateOrbitNavigation();
+              orbitMarker = viewer.entities.add({
+                position: Cesium.Cartesian3.clone(focalPoint),
+                point: {
+                  pixelSize: 10,
+                  color: Cesium.Color.CYAN,
+                  outlineColor: Cesium.Color.WHITE,
+                  outlineWidth: 2,
+                  disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                },
+              });
+              if (Cesium.defined(currentHandler)) {
+                currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+                currentHandler.enabled = autoSelectEnabled;
+              }
+              statusPanel.textContent =
+                "Orbiting focal point — right-drag to pan (Esc to unlock)";
+            });
+          } catch (e) {
+            log(`  ✗ Failed: ${e.message}`);
+          }
+        });
+
+        // --- On CC Orientations selection ---
+        let previousBestItem;
+
+        ccSelect.addEventListener("change", async function () {
+          clearCollection();
+          const itemId = this.value;
+          savePrefs({ ccId: itemId });
+          if (!itemId || !selectedITwinId) {
+            return;
+          }
+          const ccItem = currentCCItems.find((c) => c.id === itemId);
+          if (!ccItem) {
+            return;
+          }
+
+          log(`Loading CCOrientations: ${ccItem.displayName}...`);
+          try {
+            currentCollection =
+              await Cesium.ITwinData.createProjectedImageCollectionForRealityDataId({
+                iTwinId: selectedITwinId,
+                realityDataId: ccItem.id,
+                imageRealityDataId:
+                  currentImageItems.length > 0 ? currentImageItems[0].id : undefined,
+                iiifBaseUrl: IIIF_BASE_URL,
+                defaultPlaneDistance: 5.0,
+                frustumScale: 0.1,
+                showFrustums: savedShowFrustums,
+                showCameraIcons: true,
+                showLabels: savedShowLabels,
+                alpha: 1.0,
+                frustumColor: Cesium.Color.WHITE,
+              });
+            scene.primitives.add(currentCollection);
+            window.__collection = currentCollection;
+            log(`  ✓ Loaded ${currentCollection.length} projected images`);
+
+            currentHandler = new Cesium.ProjectedImageCollectionHandler(
+              currentCollection,
+              scene,
+              {
+                enabled: false,
+                weights: { alignment: 0.7, distance: 0.3 },
+                hysteresis: snapToImageEnabled ? 0.01 : 0.05,
+                threshold: 0.05,
+                warmCount: 5,
+                warmCallback: function (items) {
+                  if (!selectedITwinId) {
+                    return;
+                  }
+                  const authHeader = Cesium.ITwinPlatform._getAuthorizationHeader();
+                  for (const item of items) {
+                    const iiif = item.primitive._iiifImageSource;
+                    if (!Cesium.defined(iiif)) {
+                      continue;
+                    }
+                    const stem = iiif._iiifImageBase.split("/").pop();
+                    if (!stem) {
+                      continue;
+                    }
+                    fetch(`${IIIF_BASE_URL}/${selectedITwinId}/warm/${stem}`, {
+                      method: "POST",
+                      headers: { Authorization: authHeader },
+                    }).catch(() => {}); // fire-and-forget
+                  }
+                },
+              },
+            );
+
+            previousBestItem = undefined;
+            preRenderListener = scene.preRender.addEventListener(function () {
+              if (!Cesium.defined(currentHandler)) {
+                return;
+              }
+              const best = currentHandler.currentBestItem;
+
+              if (best !== previousBestItem) {
+                if (
+                  Cesium.defined(previousBestItem) &&
+                  Cesium.defined(previousBestItem.frustumPrimitive)
+                ) {
+                  previousBestItem.frustumPrimitive.show =
+                    currentCollection.showFrustums || showAllFrustums;
+                }
+                if (Cesium.defined(best) && Cesium.defined(best.frustumPrimitive)) {
+                  best.frustumPrimitive.show = showAllFrustums ? true : false;
+                }
+                previousBestItem = best;
+
+                if (Cesium.defined(best)) {
+                  // Dynamic planeDistance: place projection plane at mesh surface
+                  if (Cesium.Cartesian3.magnitudeSquared(focalPoint) > 1.0) {
+                    const dist = Cesium.Cartesian3.distance(
+                      best.cameraPosition,
+                      focalPoint,
+                    );
+                    if (dist > 0.1) {
+                      best.primitive.planeDistance = dist;
+                    }
+                  }
+                }
+              }
+
+              // When "Show all frustums" is on, force all frustums visible
+              // (the handler's setItemShow hides non-best items each frame)
+              if (showAllFrustums) {
+                for (let i = 0; i < currentCollection.length; i++) {
+                  const item = currentCollection.get(i);
+                  if (Cesium.defined(item.frustumPrimitive)) {
+                    item.frustumPrimitive.show = true;
+                  }
+                }
+              }
+
+              if (best) {
+                const score = Cesium.ProjectedImageCollection.computeViewScore(
+                  best,
+                  scene.camera,
+                  currentHandler.weights,
+                  currentHandler.targetPoint,
+                ).toFixed(3);
+                const iiif = best.primitive._iiifImageSource;
+                const lod = iiif ? `${iiif._currentLodLevel}px` : "N/A";
+                statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score}, LOD: ${lod})`;
+
+                if (snapToImageEnabled && !panActive && best !== lastSnappedItem) {
+                  lastSnappedItem = best;
+
+                  // Capture range before setView changes the camera position
+                  const snapRange = orbitActive
+                    ? Cesium.Cartesian3.distance(viewer.camera.positionWC, focalPoint)
+                    : 50.0;
+
+                  // Compute planeDistance using the current focalPoint (on mesh surface)
+                  // BEFORE we overwrite it with the synthetic projection below.
+                  const snapPlaneDist = Cesium.Cartesian3.distance(
+                    best.cameraPosition,
+                    focalPoint,
+                  );
+
+                  viewer.camera.setView({
+                    destination: best.cameraPosition,
+                    orientation: {
+                      direction: best.cameraDirection,
+                      up: best.cameraUp,
+                    },
+                  });
+
+                  // Advance focal point along the new camera direction at the same range
+                  Cesium.Cartesian3.multiplyByScalar(
+                    best.cameraDirection,
+                    snapRange,
+                    panDeltaScratch,
+                  );
+                  Cesium.Cartesian3.add(best.cameraPosition, panDeltaScratch, focalPoint);
+
+                  // Re-enter orbit. lookAt(target, HPR(h,p,r)) places camera at
+                  // target - r·direction(h,p), so the look direction heading/pitch
+                  // (after setView) puts the camera back at best.cameraPosition.
+                  panHprScratch.heading = viewer.camera.heading;
+                  panHprScratch.pitch = viewer.camera.pitch;
+                  panHprScratch.range = snapRange;
+                  viewer.camera.lookAt(focalPoint, panHprScratch);
+
+                  if (!orbitActive) {
+                    activateOrbitNavigation();
+                    orbitActive = true;
+                  }
+                  // Signal the pan handler to discard its next delta: panPrevScreenPos
+                  // is relative to the pre-snap camera and will produce a garbage world
+                  // delta from the new camera position, causing snap to oscillate back.
+                  panResetNeeded = true;
+                  panRange = snapRange;
+                  panHeading = viewer.camera.heading;
+                  panPitch = viewer.camera.pitch;
+                  if (Cesium.defined(orbitMarker)) {
+                    orbitMarker.position = Cesium.Cartesian3.clone(focalPoint);
+                  }
+                  if (Cesium.defined(currentHandler)) {
+                    currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+                  }
+                  // Update planeDistance using pre-snap focalPoint (on mesh surface)
+                  if (snapPlaneDist > 0.1) {
+                    best.primitive.planeDistance = snapPlaneDist;
+                  }
+                }
+              } else if (orbitActive) {
+                statusPanel.textContent = "Orbiting focal point (Esc to unlock)";
+              } else {
+                statusPanel.textContent = "Active: none";
+              }
+            });
+          } catch (e) {
+            log(`  ✗ CCOrientations failed: ${e.message}`);
+            console.error(e);
+          }
+        });
+
+        // --- Toggles ---
+        const sp = savedPrefs;
+        let autoSelectEnabled = sp.autoSelect !== undefined ? sp.autoSelect : true;
+        let snapToImageEnabled = sp.snapToImage !== undefined ? sp.snapToImage : false;
+        let lastSnappedItem;
+
+        Sandcastle.addToggleButton(
+          "Auto-select best view",
+          autoSelectEnabled,
+          function (checked) {
+            autoSelectEnabled = checked;
+            savePrefs({ autoSelect: checked });
+            if (Cesium.defined(currentHandler)) {
+              currentHandler.enabled = checked;
+              if (!checked && Cesium.defined(currentCollection)) {
+                for (let i = 0; i < currentCollection.length; i++) {
+                  currentCollection.setItemShow(currentCollection.get(i), true);
+                }
+              }
+            }
+          },
+        );
+
+        Sandcastle.addToggleButton(
+          "Snap to images",
+          snapToImageEnabled,
+          function (checked) {
+            snapToImageEnabled = checked;
+            savePrefs({ snapToImage: checked });
+            if (!checked) {
+              lastSnappedItem = undefined;
+            }
+            // Target-point scoring produces smaller score deltas between adjacent
+            // cameras than the default 0.05 hysteresis.  Lower it so the handler
+            // can actually switch to the nearest camera when the user pans.
+            if (Cesium.defined(currentHandler)) {
+              currentHandler.hysteresis = checked ? 0.01 : 0.05;
+            }
+          },
+        );
+
+        let showAllFrustums =
+          sp.showAllFrustums !== undefined ? sp.showAllFrustums : false;
+        Sandcastle.addToggleButton(
+          "Show all frustums",
+          showAllFrustums,
+          function (checked) {
+            showAllFrustums = checked;
+            savePrefs({ showAllFrustums: checked });
+            if (Cesium.defined(currentCollection)) {
+              for (let i = 0; i < currentCollection.length; i++) {
+                const item = currentCollection.get(i);
+                if (Cesium.defined(item.frustumPrimitive)) {
+                  item.frustumPrimitive.show = checked || currentCollection.showFrustums;
+                }
+              }
+            }
+          },
+        );
+
+        const savedShowFrustums = sp.showFrustums !== undefined ? sp.showFrustums : true;
+        Sandcastle.addToggleButton(
+          "Show frustums",
+          savedShowFrustums,
+          function (checked) {
+            savePrefs({ showFrustums: checked });
+            if (Cesium.defined(currentCollection)) {
+              currentCollection.showFrustums = checked;
+            }
+          },
+        );
+
+        const savedShowLabels = sp.showLabels !== undefined ? sp.showLabels : true;
+        Sandcastle.addToggleButton("Show labels", savedShowLabels, function (checked) {
+          savePrefs({ showLabels: checked });
+          if (Cesium.defined(currentCollection)) {
+            currentCollection.showLabels = checked;
+          }
+        });
+
+        // --- Scene-core-style navigation: orbit (left-drag) + pan (right-drag) ---
+        let orbitActive = false;
+        let orbitMarker;
+
+        // Mutable focal point — set on double-click, updated by pan
+        const focalPoint = new Cesium.Cartesian3();
+
+        // Pan state — set on RIGHT_DOWN, used in MOUSE_MOVE, cleared on RIGHT_UP
+        let panActive = false;
+        let panHeading, panPitch, panRange;
+        let panResetNeeded = false; // true after snap fires; next MOUSE_MOVE reseeds prevScreenPos
+        const panPrevScreenPos = new Cesium.Cartesian2();
+
+        // Scratch variables for the pan MOUSE_MOVE handler — avoids per-frame allocation
+        const panNormalScratch = new Cesium.Cartesian3();
+        const panPlaneScratch = new Cesium.Plane(Cesium.Cartesian3.UNIT_Z, 0);
+        const panPrevIntersectScratch = new Cesium.Cartesian3();
+        const panCurrIntersectScratch = new Cesium.Cartesian3();
+        const panDeltaScratch = new Cesium.Cartesian3();
+        let lastPanPlaneDistance = 0; // throttle planeDistance updates during pan
+        const panHprScratch = new Cesium.HeadingPitchRange();
+
+        // Suppress browser right-click context menu so right-drag pan works
+        scene.canvas.addEventListener("contextmenu", function (e) {
+          e.preventDefault();
+        });
+
+        // Remap ScreenSpaceCameraController events to disable RIGHT_DRAG zoom
+        // while orbit/pan is active, then restore when orbit is released.
+        function activateOrbitNavigation() {
+          const csc = scene.screenSpaceCameraController;
+          csc.zoomEventTypes = [
+            Cesium.CameraEventType.WHEEL,
+            Cesium.CameraEventType.PINCH,
+          ];
+          csc.tiltEventTypes = [
+            Cesium.CameraEventType.MIDDLE_DRAG,
+            Cesium.CameraEventType.PINCH,
+            {
+              eventType: Cesium.CameraEventType.LEFT_DRAG,
+              modifier: Cesium.KeyboardEventModifier.CTRL,
+            },
+          ];
+        }
+
+        function deactivateOrbitNavigation() {
+          const csc = scene.screenSpaceCameraController;
+          csc.zoomEventTypes = [
+            Cesium.CameraEventType.RIGHT_DRAG,
+            Cesium.CameraEventType.WHEEL,
+            Cesium.CameraEventType.PINCH,
+          ];
+          csc.tiltEventTypes = [
+            Cesium.CameraEventType.MIDDLE_DRAG,
+            Cesium.CameraEventType.PINCH,
+            {
+              eventType: Cesium.CameraEventType.LEFT_DRAG,
+              modifier: Cesium.KeyboardEventModifier.CTRL,
+            },
+            {
+              eventType: Cesium.CameraEventType.RIGHT_DRAG,
+              modifier: Cesium.KeyboardEventModifier.CTRL,
+            },
+          ];
+        }
+
+        function unlockOrbit() {
+          if (!orbitActive) {
+            return;
+          }
+          viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+          orbitActive = false;
+          panActive = false;
+          deactivateOrbitNavigation();
+          if (Cesium.defined(orbitMarker)) {
+            viewer.entities.remove(orbitMarker);
+            orbitMarker = undefined;
+          }
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.targetPoint = undefined;
+            currentHandler.enabled = false;
+            // Hide all projected images when orbit is unlocked
+            if (Cesium.defined(currentCollection)) {
+              for (let i = 0; i < currentCollection.length; i++) {
+                currentCollection.setItemShow(currentCollection.get(i), false);
+              }
+            }
+          }
+          statusPanel.textContent = "Orbit unlocked";
+        }
+
+        // Right-drag pan handler — registered once for the app lifetime.
+        // Guards on orbitActive so it is a no-op outside of orbit mode.
+        const panHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+
+        panHandler.setInputAction(function (click) {
+          if (!orbitActive) {
+            return;
+          }
+          panActive = true;
+          panResetNeeded = false;
+          Cesium.Cartesian2.clone(click.position, panPrevScreenPos);
+          panHeading = scene.camera.heading;
+          panPitch = scene.camera.pitch;
+          panRange = Cesium.Cartesian3.distance(scene.camera.positionWC, focalPoint);
+        }, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
+
+        panHandler.setInputAction(function (movement) {
+          if (!orbitActive || !panActive) {
+            return;
+          }
+
+          // If snap fired since last frame, panPrevScreenPos is from the old camera
+          // position and will produce a garbage delta. Skip this frame and reseed.
+          if (panResetNeeded) {
+            panResetNeeded = false;
+            Cesium.Cartesian2.clone(movement.endPosition, panPrevScreenPos);
+            return;
+          }
+
+          const camera = scene.camera;
+
+          // Screen-aligned focal plane: through focalPoint, normal = camera direction.
+          // This gives "drag on screen = move in world" behaviour with no degeneracy.
+          const planeNormal = Cesium.Cartesian3.clone(
+            camera.directionWC,
+            panNormalScratch,
+          );
+          Cesium.Plane.fromPointNormal(focalPoint, planeNormal, panPlaneScratch);
+
+          const prevRay = camera.getPickRay(panPrevScreenPos);
+          const currRay = camera.getPickRay(movement.endPosition);
+
+          const prevIntersect = Cesium.IntersectionTests.rayPlane(
+            prevRay,
+            panPlaneScratch,
+            panPrevIntersectScratch,
+          );
+          const currIntersect = Cesium.IntersectionTests.rayPlane(
+            currRay,
+            panPlaneScratch,
+            panCurrIntersectScratch,
+          );
+
+          // Guard: skip this frame if either ray misses the plane
+          if (!Cesium.defined(prevIntersect) || !Cesium.defined(currIntersect)) {
+            Cesium.Cartesian2.clone(movement.endPosition, panPrevScreenPos);
+            return;
+          }
+
+          // Grab-and-drag: subtract delta so the scene follows the cursor
+          Cesium.Cartesian3.subtract(currIntersect, prevIntersect, panDeltaScratch);
+          Cesium.Cartesian3.subtract(focalPoint, panDeltaScratch, focalPoint);
+
+          // Re-apply lookAt with new focal point, preserving heading/pitch/range
+          panHprScratch.heading = panHeading;
+          panHprScratch.pitch = panPitch;
+          panHprScratch.range = panRange;
+          camera.lookAt(focalPoint, panHprScratch);
+
+          // Keep the orbit marker dot and image scoring target in sync
+          if (Cesium.defined(orbitMarker)) {
+            orbitMarker.position = Cesium.Cartesian3.clone(focalPoint);
+          }
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+          }
+
+          // Update planeDistance for the active image during pan (throttled)
+          if (
+            Cesium.defined(currentHandler) &&
+            Cesium.defined(currentHandler.currentBestItem)
+          ) {
+            const bestItem = currentHandler.currentBestItem;
+            const dist = Cesium.Cartesian3.distance(bestItem.cameraPosition, focalPoint);
+            if (dist > 0.1 && Math.abs(dist - lastPanPlaneDistance) > 0.5) {
+              bestItem.primitive.planeDistance = dist;
+              lastPanPlaneDistance = dist;
+            }
+          }
+
+          Cesium.Cartesian2.clone(movement.endPosition, panPrevScreenPos);
+        }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+        panHandler.setInputAction(function () {
+          panActive = false;
+          // Force re-evaluation of snap on the next preRender.
+          // The handler may have already switched mid-drag (with reduced
+          // hysteresis) but the Sandcastle snap check didn't fire because
+          // best === lastSnappedItem at that moment.
+          if (snapToImageEnabled) {
+            lastSnappedItem = undefined;
+          }
+        }, Cesium.ScreenSpaceEventType.RIGHT_UP);
+
+        const globalClickHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+        globalClickHandler.setInputAction(function (click) {
+          // 1. If a camera icon was clicked, fly to that camera's view
+          if (Cesium.defined(currentCollection)) {
+            const picked = scene.pick(click.position);
+            if (Cesium.defined(picked)) {
+              const item = currentCollection.getItemFromPick(picked);
+              if (Cesium.defined(item)) {
+                unlockOrbit();
+                viewer.camera.flyTo({
+                  destination: item.cameraPosition,
+                  orientation: {
+                    direction: item.cameraDirection,
+                    up: item.cameraUp,
+                  },
+                  duration: 1.0,
+                });
+                return;
+              }
+            }
+          }
+
+          // 2. Otherwise, pick a 3D position and set it as the orbit center.
+          //
+          // Gaussian splats don't write depth, so scene.pickPosition()
+          // falls through to the globe — returning a position far behind
+          // the model.  When a hidden depth-source mesh is available we
+          // skip the regular pick entirely, render the mesh for one
+          // frame, and read the depth from that.
+          let pickedPosition;
+          const hasDepthSource = Cesium.defined(depthSourceTileset);
+          const bs = currentTileset?.boundingSphere;
+
+          if (hasDepthSource) {
+            depthSourceTileset.show = true;
+            scene.render(viewer.clock.currentTime);
+            pickedPosition = scene.pickPosition(click.position);
+            depthSourceTileset.show = false;
+
+            // Discard picks that landed on the globe behind the model.
+            if (Cesium.defined(pickedPosition) && Cesium.defined(bs)) {
+              const pickDist = Cesium.Cartesian3.distance(
+                viewer.camera.positionWC,
+                pickedPosition,
+              );
+              const bsDist = Cesium.Cartesian3.distance(
+                viewer.camera.positionWC,
+                bs.center,
+              );
+              if (pickDist > bsDist + bs.radius) {
+                pickedPosition = undefined;
+              }
+            }
+          } else {
+            pickedPosition = scene.pickPosition(click.position);
+          }
+
+          // Fallback: intersect the pick ray with the bounding sphere.
+          if (!Cesium.defined(pickedPosition) && Cesium.defined(bs)) {
+            const ray = viewer.camera.getPickRay(click.position);
+            if (Cesium.defined(ray)) {
+              const intersection = Cesium.IntersectionTests.raySphere(ray, bs);
+              if (Cesium.defined(intersection) && intersection.start > 1.0) {
+                // Camera outside sphere — use the near hit
+                pickedPosition = Cesium.Ray.getPoint(ray, intersection.start);
+              } else {
+                // Camera inside the sphere or at its surface — project the
+                // sphere center onto the ray to get a point roughly in the
+                // middle of the model along the view direction.
+                const toCenter = Cesium.Cartesian3.subtract(
+                  bs.center,
+                  ray.origin,
+                  new Cesium.Cartesian3(),
+                );
+                const projDist = Cesium.Cartesian3.dot(toCenter, ray.direction);
+                pickedPosition = Cesium.Ray.getPoint(ray, Math.max(projDist, 1.0));
+              }
+            }
+          }
+
+          if (!Cesium.defined(pickedPosition)) {
+            return;
+          }
+
+          unlockOrbit(); // clear any previous orbit
+
+          // Place a small marker at the focal point
+          orbitMarker = viewer.entities.add({
+            position: pickedPosition,
+            point: {
+              pixelSize: 10,
+              color: Cesium.Color.CYAN,
+              outlineColor: Cesium.Color.WHITE,
+              outlineWidth: 2,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          });
+
+          // Compute direction from camera to the new focal point
+          const camPos = Cesium.Cartesian3.clone(scene.camera.positionWC);
+          const direction = Cesium.Cartesian3.subtract(
+            pickedPosition,
+            camPos,
+            new Cesium.Cartesian3(),
+          );
+          const range = Cesium.Cartesian3.magnitude(direction);
+          Cesium.Cartesian3.normalize(direction, direction);
+
+          // Use the ellipsoid-normal "up" at the camera position so the
+          // camera stays gravity-aligned throughout the transition.
+          const gravityUp = Cesium.Cartesian3.normalize(camPos, new Cesium.Cartesian3());
+          // Build a right vector perpendicular to the look direction and gravity up
+          const right = Cesium.Cartesian3.cross(
+            direction,
+            gravityUp,
+            new Cesium.Cartesian3(),
+          );
+          Cesium.Cartesian3.normalize(right, right);
+          // Re-derive up so it's exactly perpendicular to direction
+          const up = Cesium.Cartesian3.cross(right, direction, new Cesium.Cartesian3());
+          Cesium.Cartesian3.normalize(up, up);
+
+          statusPanel.textContent = "Flying to focal point…";
+
+          // Smoothly rotate the camera to look at the new point, then lock orbit
+          viewer.camera.flyTo({
+            destination: camPos,
+            orientation: { direction: direction, up: up },
+            duration: 0.6,
+            complete: function () {
+              Cesium.Cartesian3.clone(pickedPosition, focalPoint);
+              viewer.camera.lookAt(
+                focalPoint,
+                new Cesium.HeadingPitchRange(
+                  viewer.camera.heading,
+                  viewer.camera.pitch,
+                  range,
+                ),
+              );
+              orbitActive = true;
+              activateOrbitNavigation();
+              if (Cesium.defined(currentHandler)) {
+                currentHandler.targetPoint = Cesium.Cartesian3.clone(focalPoint);
+                currentHandler.enabled = autoSelectEnabled;
+              }
+              statusPanel.textContent =
+                "Orbiting focal point — right-drag to pan (Esc to unlock)";
+            },
+          });
+        }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
+        // Escape key unlocks orbit mode
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") {
+            unlockOrbit();
+          }
+        });
+
+        // --- Deferred auto-restore of saved selections ---
+        // Must run after all variables (orbitActive, etc.) are declared.
+        if (savedPrefs.iTwinId) {
+          // If saved ID isn't in the dropdown, add it
+          if (
+            !Array.from(iTwinSelect.options).some((o) => o.value === savedPrefs.iTwinId)
+          ) {
+            const opt = document.createElement("option");
+            opt.value = savedPrefs.iTwinId;
+            opt.textContent = `${savedPrefs.iTwinId} (saved)`;
+            iTwinSelect.insertBefore(opt, iTwinSelect.lastElementChild);
+          }
+          iTwinSelect.value = savedPrefs.iTwinId;
+          await onITwinSelected(savedPrefs.iTwinId);
+
+          // After iTwin loaded, restore tileset and CC
+          if (
+            savedPrefs.tilesetId &&
+            currentMeshItems.some((m) => m.id === savedPrefs.tilesetId)
+          ) {
+            tilesetSelect.value = savedPrefs.tilesetId;
+            tilesetSelect.dispatchEvent(new Event("change"));
+          }
+          if (savedPrefs.ccId && currentCCItems.some((c) => c.id === savedPrefs.ccId)) {
+            ccSelect.value = savedPrefs.ccId;
+            ccSelect.dispatchEvent(new Event("change"));
+          }
+        }
+
+        //Sandcastle_End
+      };
+      if (typeof Cesium !== "undefined") {
+        window.startupCalled = true;
+        window.startup(Cesium).catch((error) => {
+          "use strict";
+          console.error(error);
+        });
+      }
+    </script>
+  </body>
+</html>

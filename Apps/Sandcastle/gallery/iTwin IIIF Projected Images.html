@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no"
+    />
+    <meta
+      name="description"
+      content="Test IIIF progressive LOD texture loading for projected images."
+    />
+    <meta name="cesium-sandcastle-labels" content="Development" />
+    <title>iTwin IIIF Projected Images</title>
+    <script type="text/javascript" src="../Sandcastle-header.js"></script>
+    <script
+      type="text/javascript"
+      src="../../../Build/CesiumUnminified/Cesium.js"
+      nomodule
+    ></script>
+    <script type="module" src="../load-cesium-es6.js"></script>
+  </head>
+  <body class="sandcastle-loading" data-sandcastle-bucket="bucket-requirejs.html">
+    <style>
+      @import url(../templates/bucket.css);
+      #statusPanel {
+        position: absolute;
+        bottom: 40px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 6px;
+        font: 13px monospace;
+        z-index: 100;
+        max-width: 500px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+    </style>
+    <div id="cesiumContainer" class="fullSize"></div>
+    <div id="loadingOverlay"><h1>Loading...</h1></div>
+    <div id="toolbar"></div>
+    <div id="statusPanel">Initializing...</div>
+    <script id="cesium_sandcastle_script">
+      window.startup = async function (Cesium) {
+        "use strict";
+        //Sandcastle_Begin
+
+        // =====================================================================
+        // CONFIGURE THESE VALUES
+        // =====================================================================
+
+        const iTwinId = "dee09412-1b68-4725-840d-1d0af8ed2213";
+        const IIIF_BASE_URL = "https://iiif.aact-platform-dev.pointivo.com";
+
+        // =====================================================================
+
+        // Prompt for Bearer token at startup
+        const savedToken = sessionStorage.getItem("iiif_demo_token");
+        let token = savedToken || window.prompt(
+          "Paste your Bentley IMS Bearer token (with or without 'Bearer ' prefix):"
+        );
+        if (!token) {
+          document.getElementById("statusPanel").textContent =
+            "No token provided. Reload to try again.";
+          return;
+        }
+        // Strip "Bearer " prefix if user included it
+        token = token.trim().replace(/^Bearer\s+/i, "");
+        sessionStorage.setItem("iiif_demo_token", token);
+        Cesium.ITwinPlatform.defaultAccessToken = token;
+
+        const statusPanel = document.getElementById("statusPanel");
+        function log(msg) {
+          console.log(msg);
+          statusPanel.textContent += `\n${msg}`;
+        }
+
+        const viewer = new Cesium.Viewer("cesiumContainer", {
+          infoBox: false,
+          selectionIndicator: false,
+          terrain: Cesium.Terrain.fromWorldTerrain(),
+        });
+        const scene = viewer.scene;
+
+        let currentTileset;
+        let currentCollection;
+        let currentHandler;
+        let preRenderListener;
+
+        function clearTileset() {
+          if (Cesium.defined(currentTileset)) {
+            scene.primitives.remove(currentTileset);
+            currentTileset = undefined;
+          }
+        }
+
+        function clearCollection() {
+          if (Cesium.defined(preRenderListener)) {
+            preRenderListener();
+            preRenderListener = undefined;
+          }
+          if (Cesium.defined(currentHandler)) {
+            currentHandler.destroy();
+            currentHandler = undefined;
+          }
+          if (Cesium.defined(currentCollection)) {
+            scene.primitives.remove(currentCollection);
+            currentCollection = undefined;
+          }
+        }
+
+        // --- List all reality data ---
+        log("Listing reality data...");
+        let allData;
+        try {
+          allData = await Cesium.ITwinPlatform.listRealityData(iTwinId);
+          log(`Found ${allData.length} reality data items:`);
+          for (const rd of allData) {
+            log(`  [${rd.type}] ${rd.displayName} (${rd.id})`);
+          }
+        } catch (e) {
+          log(`Error listing data: ${e.message}`);
+          log("Make sure you set defaultAccessToken or defaultShareKey above.");
+          return;
+        }
+
+        const meshTypes = [
+          "Cesium3DTiles",
+          "RealityMesh3DTiles",
+          "PNTS",
+          "Terrain3DTiles",
+          "GS_3DT",
+          "GaussianSplats",
+        ];
+        const meshItems = allData.filter((rd) => meshTypes.includes(rd.type));
+        const ccItems = allData.filter((rd) => rd.type === "CCOrientations");
+        const imageItems = allData.filter(
+          (rd) => rd.type === "CCImageCollection",
+        );
+
+        // --- 3D Tiles dropdown ---
+        const tilesetOptions = [{ text: "(none)", onselect: clearTileset }];
+        for (const item of meshItems) {
+          tilesetOptions.push({
+            text: item.displayName,
+            onselect: (function (it) {
+              return async function () {
+                clearTileset();
+                log(`Loading 3D Tiles: ${it.displayName}...`);
+                try {
+                  currentTileset =
+                    await Cesium.ITwinData.createTilesetForRealityDataId({
+                      iTwinId: iTwinId,
+                      realityDataId: it.id,
+                      type: it.type,
+                      rootDocument: it.rootDocument,
+                    });
+                  scene.primitives.add(currentTileset);
+                  log(`  ✓ Loaded ${it.displayName}`);
+                  viewer.flyTo(currentTileset);
+                } catch (e) {
+                  log(`  ✗ Failed: ${e.message}`);
+                }
+              };
+            })(item),
+          });
+        }
+        Sandcastle.addToolbarMenu(tilesetOptions, "toolbar");
+
+        // --- CCOrientations dropdown (WITH IIIF) ---
+        const ccOptions = [
+          { text: "(no orientations)", onselect: clearCollection },
+        ];
+        for (const ccItem of ccItems) {
+          ccOptions.push({
+            text: `${ccItem.displayName} (IIIF)`,
+            onselect: (function (cc) {
+              return async function () {
+                clearCollection();
+                log(`Loading CCOrientations via IIIF: ${cc.displayName}...`);
+                try {
+                  currentCollection =
+                    await Cesium.ITwinData.createProjectedImageCollectionForRealityDataId(
+                      {
+                        iTwinId: iTwinId,
+                        realityDataId: cc.id,
+                        imageRealityDataId:
+                          imageItems.length > 0 ? imageItems[0].id : undefined,
+                        iiifBaseUrl: IIIF_BASE_URL,
+                        defaultPlaneDistance: 10.0,
+                        showFrustums: true,
+                        showCameraIcons: true,
+                        showLabels: true,
+                        alpha: 1.0,
+                        frustumColor: Cesium.Color.WHITE,
+                      },
+                    );
+                  scene.primitives.add(currentCollection);
+                  log(
+                    `  ✓ Loaded ${currentCollection.length} projected images via IIIF`,
+                  );
+                  log(`  IIIF server: ${IIIF_BASE_URL}`);
+
+                  currentHandler =
+                    new Cesium.ProjectedImageCollectionHandler(
+                      currentCollection,
+                      scene,
+                      {
+                        enabled: true,
+                        weights: { alignment: 0.7, distance: 0.3 },
+                        hysteresis: 0.05,
+                        threshold: 0.05,
+                      },
+                    );
+
+                  preRenderListener =
+                    scene.preRender.addEventListener(function () {
+                      if (!Cesium.defined(currentHandler)) {
+                        return;
+                      }
+                      const best = currentHandler.currentBestItem;
+                      if (best) {
+                        const score =
+                          Cesium.ProjectedImageCollection.computeViewScore(
+                            best,
+                            scene.camera,
+                            currentHandler.weights,
+                          ).toFixed(3);
+                        statusPanel.textContent = `Active: ${best.options.name ?? "?"} (score: ${score})`;
+                      } else {
+                        statusPanel.textContent = "Active: none";
+                      }
+                    });
+                } catch (e) {
+                  log(`  ✗ CCOrientations failed: ${e.message}`);
+                  console.error(e);
+                }
+              };
+            })(ccItem),
+          });
+        }
+        Sandcastle.addToolbarMenu(ccOptions, "toolbar");
+
+        // --- Toggles ---
+        Sandcastle.addToggleButton(
+          "Show frustums",
+          true,
+          function (checked) {
+            if (Cesium.defined(currentCollection)) {
+              currentCollection.showFrustums = checked;
+            }
+          },
+        );
+
+        Sandcastle.addToggleButton(
+          "Show labels",
+          true,
+          function (checked) {
+            if (Cesium.defined(currentCollection)) {
+              currentCollection.showLabels = checked;
+            }
+          },
+        );
+
+        //Sandcastle_End
+      };
+      if (typeof Cesium !== "undefined") {
+        window.startupCalled = true;
+        window.startup(Cesium).catch((error) => {
+          "use strict";
+          console.error(error);
+        });
+      }
+    </script>
+  </body>
+</html>

@@ -49,9 +49,14 @@ ITwinPlatform.RealityDataType = Object.freeze({
   RealityMesh3DTiles: "RealityMesh3DTiles",
   Terrain3DTiles: "Terrain3DTiles",
   GaussianSplat3DTiles: "GS_3DT",
+  GaussianSplats: "GaussianSplats",
+  GaussianSplatPLY: "GS_PLY",
   KML: "KML",
   GeoJSON: "GeoJSON",
   Unstructured: "Unstructured",
+  CCOrientations: "CCOrientations",
+  CCImageCollection: "CCImageCollection",
+  ContextScene: "ContextScene",
 });
 
 /**
@@ -254,6 +259,83 @@ ITwinPlatform.getExports = async function (iModelId, changesetId) {
  */
 
 /**
+ * List all reality data associated with the given iTwin.
+ * Supports optional filtering by type.
+ *
+ * @private
+ *
+ * @param {string} iTwinId The id of the iTwin
+ * @param {object} [options] Options
+ * @param {string[]} [options.types] Optional array of reality data type strings to filter by
+ * @returns {Promise<RealityDataRepresentation[]>}
+ *
+ * @throws {RuntimeError} If the iTwin API request is not successful
+ */
+ITwinPlatform.listRealityData = async function (iTwinId, options) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.string("iTwinId", iTwinId);
+  if (
+    !defined(ITwinPlatform.defaultAccessToken) &&
+    !defined(ITwinPlatform.defaultShareKey)
+  ) {
+    throw new DeveloperError(
+      "Must set ITwinPlatform.defaultAccessToken or ITwinPlatform.defaultShareKey first",
+    );
+  }
+  //>>includeEnd('debug');
+
+  const queryParameters = { iTwinId: iTwinId, $top: "100" };
+  if (defined(options) && defined(options.types)) {
+    queryParameters.types = options.types.join(",");
+  }
+
+  let allData = [];
+  let nextUrl;
+  let isFirstPage = true;
+
+  while (isFirstPage || defined(nextUrl)) {
+    const resource = new Resource({
+      url: isFirstPage
+        ? `${ITwinPlatform.apiEndpoint}reality-management/reality-data`
+        : nextUrl,
+      headers: {
+        Authorization: ITwinPlatform._getAuthorizationHeader(),
+        Accept: "application/vnd.bentley.itwin-platform.v1+json",
+        Prefer: "return=representation",
+      },
+    });
+
+    if (isFirstPage) {
+      resource.appendQueryParameters(queryParameters);
+    }
+
+    try {
+      const response = await resource.fetchJson();
+      if (defined(response.realityData)) {
+        allData = allData.concat(response.realityData);
+      }
+      nextUrl = response._links?.next?.href;
+      isFirstPage = false;
+    } catch (error) {
+      const result = JSON.parse(error.response);
+      if (error.statusCode === 401) {
+        const code = result.error.details?.[0].code ?? "";
+        throw new RuntimeError(
+          `Unauthorized, bad token, wrong scopes or headers bad. ${code}`,
+        );
+      } else if (error.statusCode === 403) {
+        throw new RuntimeError("Not allowed, forbidden");
+      } else if (error.statusCode === 429) {
+        throw new RuntimeError("Too many requests");
+      }
+      throw new RuntimeError(`Unknown request failure ${error.statusCode}`);
+    }
+  }
+
+  return allData;
+};
+
+/**
  * Load the full metadata for the given iTwin id and reality data id.
  *
  * @private
@@ -384,6 +466,40 @@ ITwinPlatform.getRealityDataURL = async function (
     }
     throw new RuntimeError(`Unknown request failure ${error.statusCode}`);
   }
+};
+
+/**
+ * Request the container base URL for the given reality data.
+ * Unlike {@link ITwinPlatform.getRealityDataURL}, this does NOT append
+ * the rootDocument — it returns the raw container URL, suitable for
+ * resolving relative paths within the blob container.
+ *
+ * @private
+ *
+ * @param {string} iTwinId The id of the iTwin
+ * @param {string} realityDataId The id of the reality data
+ * @returns {Promise<string>} The container base URL (with SAS token)
+ */
+ITwinPlatform.getRealityDataContainerUrl = async function (
+  iTwinId,
+  realityDataId,
+) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.string("iTwinId", iTwinId);
+  Check.typeOf.string("realityDataId", realityDataId);
+  //>>includeEnd('debug');
+
+  const resource = new Resource({
+    url: `${ITwinPlatform.apiEndpoint}reality-management/reality-data/${realityDataId}/readaccess`,
+    headers: {
+      Authorization: ITwinPlatform._getAuthorizationHeader(),
+      Accept: "application/vnd.bentley.itwin-platform.v1+json",
+    },
+    queryParameters: { iTwinId: iTwinId },
+  });
+
+  const result = await resource.fetchJson();
+  return result._links.containerUrl.href;
 };
 
 export default ITwinPlatform;

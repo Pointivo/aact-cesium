@@ -7,6 +7,7 @@ import Check from "../Core/Check.js";
 import KmlDataSource from "../DataSources/KmlDataSource.js";
 import GeoJsonDataSource from "../DataSources/GeoJsonDataSource.js";
 import DeveloperError from "../Core/DeveloperError.js";
+import ProjectedImageCollection from "./ProjectedImageCollection.js";
 
 /**
  * Methods for loading iTwin platform data into CesiumJS
@@ -139,17 +140,52 @@ ITwinData.createTilesetForRealityDataId = async function ({
     ITwinPlatform.RealityDataType.RealityMesh3DTiles,
     ITwinPlatform.RealityDataType.Terrain3DTiles,
     ITwinPlatform.RealityDataType.GaussianSplat3DTiles,
+    ITwinPlatform.RealityDataType.GaussianSplats,
+    ITwinPlatform.RealityDataType.GaussianSplatPLY,
   ];
 
   if (!supportedRealityDataTypes.includes(type)) {
     throw new RuntimeError(`Reality data type is not a mesh type: ${type}`);
   }
 
-  const tilesetAccessUrl = await ITwinPlatform.getRealityDataURL(
-    iTwinId,
-    realityDataId,
-    rootDocument,
-  );
+  let tilesetAccessUrl;
+  if (defined(rootDocument)) {
+    tilesetAccessUrl = await ITwinPlatform.getRealityDataURL(
+      iTwinId,
+      realityDataId,
+      rootDocument,
+    );
+  } else {
+    // rootDocument not set in metadata — probe for common root documents.
+    const containerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+      iTwinId,
+      realityDataId,
+    );
+    const candidates = ["tileset.json", "Tileset.json"];
+    let found = false;
+    for (const candidate of candidates) {
+      const candidateUrlObj = new URL(containerUrl);
+      candidateUrlObj.pathname = `${candidateUrlObj.pathname}/${candidate}`;
+      const testUrl = candidateUrlObj.toString();
+      try {
+        const testResource = new Resource({ url: testUrl });
+        const text = await testResource.fetchText();
+        if (defined(text) && text.length > 0) {
+          tilesetAccessUrl = testUrl;
+          found = true;
+          break;
+        }
+      } catch (e) {
+        // not found, try next
+      }
+    }
+    if (!found) {
+      throw new RuntimeError(
+        `Could not find tileset.json in container for reality data ${realityDataId}. ` +
+          `Tried: ${candidates.join(", ")}`,
+      );
+    }
+  }
 
   // The maximum screen space error was defined to default to 4 for
   // reality data tilesets, because they did not show the expected
@@ -279,6 +315,252 @@ ITwinData.loadGeospatialFeatures = async function ({
   });
 
   return GeoJsonDataSource.load(resource);
+};
+
+/**
+ * Create a {@link ProjectedImageCollection} from a CCOrientations or CCImageCollection
+ * reality data item associated with the given iTwin.
+ *
+ * This loads the ccOrientations XML, parses it, and resolves image URLs
+ * from a companion CCImageCollection in the same iTwin (or from the same
+ * reality data container if images are co-located).
+ *
+ * @experimental This feature is not final and is subject to change without Cesium's standard deprecation policy.
+ *
+ * @param {object} options
+ * @param {string} options.iTwinId The id of the iTwin
+ * @param {string} options.realityDataId The id of the CCOrientations reality data
+ * @param {string} [options.imageRealityDataId] The id of the CCImageCollection reality data.
+ *   If not provided, the function will search for a CCImageCollection in the same iTwin.
+ * @param {string} [options.iiifBaseUrl] Base URL of the IIIF tile server (e.g. "https://iiif.example.com").
+ *   When provided, images are loaded via IIIF with progressive LOD instead of Azure blob storage.
+ * @param {string} [options.iiifAuthHeader] Authorization header for IIIF requests (e.g. "Bearer ...").
+ *   Required when using IIIF with share key auth (share keys don't work with IIIF servers).
+ *   If not provided, uses the platform's default authorization header.
+ * @param {number} [options.defaultPlaneDistance=50.0] Default projection plane distance.
+ * @param {boolean} [options.showFrustums=true] Show frustum wireframes.
+ * @param {boolean} [options.showCameraIcons=true] Show camera icons.
+ * @param {boolean} [options.showLabels=false] Show camera labels.
+ * @param {number} [options.alpha=1.0] Default image alpha.
+ * @returns {Promise<ProjectedImageCollection>}
+ *
+ * @throws {RuntimeError} If the reality data type is not CCOrientations
+ * @throws {RuntimeError} If no CCImageCollection is found and imageRealityDataId is not provided
+ */
+ITwinData.createProjectedImageCollectionForRealityDataId = async function ({
+  iTwinId,
+  realityDataId,
+  imageRealityDataId,
+  iiifBaseUrl,
+  iiifAuthHeader,
+  defaultPlaneDistance,
+  frustumScale,
+  showFrustums,
+  showCameraIcons,
+  showLabels,
+  alpha,
+  frustumColor,
+}) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.string("iTwinId", iTwinId);
+  Check.typeOf.string("realityDataId", realityDataId);
+  //>>includeEnd('debug');
+
+  // 1. Get ccOrientations metadata and URL
+  const metadata = await ITwinPlatform.getRealityDataMetadata(
+    iTwinId,
+    realityDataId,
+  );
+
+  const supportedTypes = [
+    ITwinPlatform.RealityDataType.CCOrientations,
+    ITwinPlatform.RealityDataType.ContextScene,
+  ];
+  if (!supportedTypes.includes(metadata.type)) {
+    throw new RuntimeError(
+      `Reality data type "${metadata.type}" is not CCOrientations or ContextScene`,
+    );
+  }
+
+  const isContextScene =
+    metadata.type === ITwinPlatform.RealityDataType.ContextScene;
+
+  // Get the orientations data URL.
+  let orientationsUrl;
+  if (defined(metadata.rootDocument)) {
+    orientationsUrl = await ITwinPlatform.getRealityDataURL(
+      iTwinId,
+      realityDataId,
+      metadata.rootDocument,
+    );
+  } else {
+    const containerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+      iTwinId,
+      realityDataId,
+    );
+    const candidates = isContextScene
+      ? ["ContextScene.json", "contextscene.json", "ContextScene.xml"]
+      : [
+          "Orientations/Orientations.xml",
+          "orientations.xml",
+          "Orientations.xml",
+          "ccorientations.xml",
+          "CCOrientations.xml",
+        ];
+    let found = false;
+    for (const candidate of candidates) {
+      const candidateUrlObj = new URL(containerUrl);
+      candidateUrlObj.pathname = `${candidateUrlObj.pathname}/${candidate}`;
+      const testUrl = candidateUrlObj.toString();
+      try {
+        const testResource = new Resource({ url: testUrl });
+        const text = await testResource.fetchText();
+        if (defined(text) && text.length > 0) {
+          orientationsUrl = testUrl;
+          found = true;
+          break;
+        }
+      } catch (e) {
+        // not found, try next
+      }
+    }
+    if (!found) {
+      throw new RuntimeError(
+        `Could not find orientations data in container for reality data ${realityDataId}. ` +
+          `Tried: ${candidates.join(", ")}`,
+      );
+    }
+  }
+
+  // 2. Resolve the image container URL (skip when using IIIF tile server)
+  let imageContainerUrl;
+
+  if (!defined(iiifBaseUrl)) {
+    if (defined(imageRealityDataId)) {
+      imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+        iTwinId,
+        imageRealityDataId,
+      );
+    } else {
+      // Search for a CCImageCollection in the same iTwin
+      const allData = await ITwinPlatform.listRealityData(iTwinId, {
+        types: [ITwinPlatform.RealityDataType.CCImageCollection],
+      });
+
+      if (allData.length === 0) {
+        // Fall back: try resolving images from the same container as orientations
+        imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+          iTwinId,
+          realityDataId,
+        );
+      } else {
+        // Use the first CCImageCollection found
+        imageContainerUrl = await ITwinPlatform.getRealityDataContainerUrl(
+          iTwinId,
+          allData[0].id,
+        );
+      }
+    }
+  }
+
+  // 3. Build the image URL resolver
+  let resolveImageUrl;
+  let iiifOptions;
+
+  if (defined(iiifBaseUrl)) {
+    // IIIF mode: resolve images through the tile server
+    const authHeader =
+      iiifAuthHeader || ITwinPlatform._getAuthorizationHeader();
+    const trimmedBase = iiifBaseUrl.replace(/\/+$/, "");
+
+    resolveImageUrl = function (imagePath) {
+      const normalized = imagePath.replace(/\\/g, "/");
+      const stem = normalized
+        .split("/")
+        .pop()
+        .replace(/\.[^.]+$/, "");
+      const iiifImageBase = `${trimmedBase}/${iTwinId}/${stem}`;
+      // Start with smallest thumbnail — LOD management will upgrade as needed
+      return new Resource({
+        url: `${iiifImageBase}/full/256,/0/default.jpg`,
+        headers: { Authorization: authHeader },
+      });
+    };
+
+    iiifOptions = {
+      iiifBaseUrl: trimmedBase,
+      iTwinId: iTwinId,
+      authHeader: authHeader,
+    };
+
+    console.log("IIIF tile server:", trimmedBase);
+    console.log(
+      "Sample IIIF URL:",
+      `${trimmedBase}/${iTwinId}/sample/full/1024,/0/default.jpg`,
+    );
+  } else {
+    // Azure blob mode: resolve against the image container URL
+    const containerUrlObj = new URL(imageContainerUrl);
+    const containerBase = `${containerUrlObj.origin}${containerUrlObj.pathname}`;
+    const containerSearch = containerUrlObj.search; // SAS token
+
+    // Extract the container name (last path segment, typically a GUID)
+    const pathSegments = containerUrlObj.pathname.split("/").filter((s) => s);
+    const containerName = pathSegments[pathSegments.length - 1];
+
+    resolveImageUrl = function (imagePath) {
+      // imagePath may have backslashes from Windows paths in the XML
+      let normalized = imagePath.replace(/\\/g, "/");
+
+      // Strip leading container name if the ImagePath redundantly includes it
+      if (normalized.startsWith(`${containerName}/`)) {
+        normalized = normalized.substring(containerName.length + 1);
+      }
+
+      const url = `${containerBase}/${normalized}${containerSearch}`;
+      return url;
+    };
+
+    console.log("Image container base:", containerBase);
+    console.log(
+      "Sample image URL will look like:",
+      resolveImageUrl("sample/image.jpg"),
+    );
+  }
+
+  // 4. Fetch and parse the ccOrientations XML
+  const collectionOptions = {
+    resolveImageUrl: resolveImageUrl,
+    defaultPlaneDistance: defaultPlaneDistance ?? 50.0,
+    frustumScale: frustumScale,
+    showFrustums: showFrustums,
+    showCameraIcons: showCameraIcons,
+    showLabels: showLabels,
+    alpha: alpha,
+    frustumColor: frustumColor,
+  };
+
+  // Pass IIIF config so the collection can create IIIFImageSources per image
+  if (defined(iiifOptions)) {
+    collectionOptions.iiifBaseUrl = iiifOptions.iiifBaseUrl;
+    collectionOptions.iTwinId = iiifOptions.iTwinId;
+    collectionOptions.authHeader = iiifOptions.authHeader;
+  }
+
+  let collection;
+  if (isContextScene) {
+    collection = await ProjectedImageCollection.fromContextSceneUrl(
+      orientationsUrl,
+      collectionOptions,
+    );
+  } else {
+    collection = await ProjectedImageCollection.fromCCOrientationsUrl(
+      orientationsUrl,
+      collectionOptions,
+    );
+  }
+
+  return collection;
 };
 
 export default ITwinData;

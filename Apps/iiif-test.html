@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IIIF Projected Images Test</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    #cesiumContainer { width: 100%; height: 100%; }
+    #splitSlider {
+      position: absolute; left: 50%; top: 0; width: 6px; height: 100%;
+      background: rgba(255,255,255,0.6); cursor: col-resize; z-index: 150;
+      transform: translateX(-50%);
+    }
+    #splitSlider:hover { background: rgba(255,255,255,0.9); }
+    #statusPanel {
+      position: absolute; bottom: 10px; left: 10px;
+      background: rgba(0,0,0,0.85); color: #0f0; padding: 10px 14px;
+      border-radius: 6px; font: 12px monospace; z-index: 100;
+      max-width: 400px; max-height: 250px; overflow-y: auto; white-space: pre-wrap;
+    }
+    #loginOverlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: #1a1a2e; display: flex; align-items: center; justify-content: center;
+      z-index: 200; color: #fff; font-family: sans-serif;
+    }
+    #loginOverlay button {
+      font-size: 18px; padding: 14px 32px; cursor: pointer;
+      background: #4a90d9; color: #fff; border: none; border-radius: 8px;
+    }
+    #loginOverlay button:hover { background: #357abd; }
+    #loginOverlay .status { margin-top: 16px; font-size: 14px; color: #aaa; }
+  </style>
+  <script src="../Build/CesiumUnminified/Cesium.js"></script>
+  <link rel="stylesheet" href="../Build/CesiumUnminified/Widgets/widgets.css" />
+</head>
+<body>
+  <div id="loginOverlay">
+    <div style="text-align:center">
+      <h2>IIIF Projected Images Test</h2>
+      <button id="loginBtn" onclick="authenticate()">Sign in with Bentley IMS</button>
+      <div class="status" id="loginStatus">Checking authentication...</div>
+    </div>
+  </div>
+  <div id="cesiumContainer"></div>
+  <div id="splitSlider" style="display:none"></div>
+  <div id="statusPanel" style="display:none"></div>
+  <div id="alphaControl" style="display:none; position:absolute; bottom:10px; right:10px; background:rgba(0,0,0,0.85); color:#fff; padding:10px 14px; border-radius:6px; font:12px monospace; z-index:100;">
+    <label>Image Alpha: <input type="range" id="alphaSlider" min="0" max="1" step="0.05" value="1" style="vertical-align:middle; width:120px;" />
+    <span id="alphaValue">1.00</span></label>
+    <br/>
+    <label>Roll Offset°: <input type="range" id="rollOffsetSlider" min="-30" max="30" step="0.5" value="0" style="vertical-align:middle; width:120px;" />
+    <span id="rollOffsetValue">0.0</span></label>
+  </div>
+
+<script>
+// =====================================================================
+// Configuration
+// =====================================================================
+const ITWIN_ID = "dee09412-1b68-4725-840d-1d0af8ed2213";
+const IIIF_BASE_URL = "https://iiif.aact-platform-dev.pointivo.com";
+
+// =====================================================================
+// OAuth2 PKCE Authentication (same flow as IIIF viewer)
+// =====================================================================
+const IMS_AUTHORITY = "https://ims.bentley.com";
+const AUTHORIZE_URL = IMS_AUTHORITY + "/connect/authorize";
+const TOKEN_URL = IMS_AUTHORITY + "/connect/token";
+const CLIENT_ID = "spa-kq3hJXgDnc7C86yCjeMV3CA38";
+const SCOPES = "itwin-platform";
+const REDIRECT_URI = window.location.origin + window.location.pathname;
+
+function generateCodeVerifier() {
+  const array = new Uint8Array(64);
+  crypto.getRandomValues(array);
+  return btoa(String.fromCharCode(...array))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+async function generateCodeChallenge(verifier) {
+  const data = new TextEncoder().encode(verifier);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return btoa(String.fromCharCode(...new Uint8Array(hash)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+function getStoredToken() {
+  try {
+    const data = JSON.parse(sessionStorage.getItem("itwin_token"));
+    if (data && data.access_token && data.expires_at > Date.now() / 1000) {
+      return data;
+    }
+  } catch {}
+  return null;
+}
+
+async function authenticate() {
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = await generateCodeChallenge(codeVerifier);
+  const state = generateCodeVerifier().substring(0, 32);
+
+  sessionStorage.setItem("pkce_verifier", codeVerifier);
+  sessionStorage.setItem("pkce_state", state);
+
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    response_type: "code",
+    redirect_uri: REDIRECT_URI,
+    scope: SCOPES,
+    state: state,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    response_mode: "query",
+  });
+
+  window.location.href = AUTHORIZE_URL + "?" + params.toString();
+}
+
+async function handleAuthCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code");
+  const state = params.get("state");
+
+  if (!code || !state) return false;
+
+  const savedState = sessionStorage.getItem("pkce_state");
+  const codeVerifier = sessionStorage.getItem("pkce_verifier");
+
+  if (state !== savedState || !codeVerifier) {
+    console.error("Invalid auth state");
+    return false;
+  }
+
+  document.getElementById("loginStatus").textContent = "Exchanging token...";
+
+  try {
+    const resp = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: CLIENT_ID,
+        code: code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: codeVerifier,
+      }),
+    });
+
+    if (!resp.ok) throw new Error("Token exchange failed: " + resp.status);
+
+    const tokenData = await resp.json();
+    tokenData.expires_at = Date.now() / 1000 + (tokenData.expires_in || 3600);
+    sessionStorage.setItem("itwin_token", JSON.stringify(tokenData));
+
+    sessionStorage.removeItem("pkce_verifier");
+    sessionStorage.removeItem("pkce_state");
+
+    // Remove code/state from URL and reload clean
+    window.location.href = REDIRECT_URI;
+    return true;
+  } catch (e) {
+    document.getElementById("loginStatus").textContent = "Auth failed: " + e.message;
+    return false;
+  }
+}
+
+// =====================================================================
+// Cesium App
+// =====================================================================
+function log(msg) {
+  console.log(msg);
+  const panel = document.getElementById("statusPanel");
+  panel.textContent += msg + "\n";
+  panel.scrollTop = panel.scrollHeight;
+}
+
+async function startApp(accessToken) {
+  document.getElementById("loginOverlay").style.display = "none";
+  document.getElementById("statusPanel").style.display = "block";
+
+  Cesium.ITwinPlatform.defaultAccessToken = accessToken;
+  log("Authenticated ✓");
+
+  const viewer = new Cesium.Viewer("cesiumContainer", {
+    infoBox: false,
+    selectionIndicator: false,
+    terrain: Cesium.Terrain.fromWorldTerrain(),
+  });
+  window._viewer = viewer;
+  const scene = viewer.scene;
+
+  // List reality data
+  log("Listing reality data for iTwin " + ITWIN_ID + "...");
+  let allData;
+  try {
+    allData = await Cesium.ITwinPlatform.listRealityData(ITWIN_ID);
+    log("Found " + allData.length + " items:");
+    for (const rd of allData) {
+      log("  [" + rd.type + "] " + rd.displayName);
+    }
+  } catch (e) {
+    log("Error: " + e.message);
+    return;
+  }
+
+  // Prefer mesh types over point clouds
+  const meshPriority = ["Cesium3DTiles", "RealityMesh3DTiles", "Terrain3DTiles", "GS_3DT", "GaussianSplats", "PNTS"];
+  const meshItems = [];
+  for (const type of meshPriority) {
+    for (const rd of allData) {
+      if (rd.type === type) meshItems.push(rd);
+    }
+  }
+  const csItems = allData.filter(rd => rd.type === "ContextScene");
+  const ccItems = allData.filter(rd => rd.type === "CCOrientations");
+  const imageItems = allData.filter(rd => rd.type === "CCImageCollection");
+
+  // Prefer ContextScene (has pose data) over CCOrientations (may be input-only)
+  const orientationItems = csItems.length > 0 ? csItems : ccItems;
+  const orientationType = csItems.length > 0 ? "ContextScene" : "CCOrientations";
+
+  // Load first 3D tileset (mesh preferred over point cloud)
+  if (meshItems.length > 0) {
+    const mesh = meshItems[0];
+    log("Loading 3D Tiles: " + mesh.displayName + " [" + mesh.type + "]...");
+    try {
+      const tileset = await Cesium.ITwinData.createTilesetForRealityDataId({
+        iTwinId: ITWIN_ID,
+        realityDataId: mesh.id,
+        type: mesh.type,
+        rootDocument: mesh.rootDocument,
+      });
+      tileset.cacheBytes = 512 * 1024 * 1024;
+      tileset.maximumCacheOverflowBytes = 256 * 1024 * 1024;
+      scene.primitives.add(tileset);
+      log("  ✓ 3D Tiles loaded");
+      viewer.flyTo(tileset);
+    } catch (e) {
+      log("  ✗ " + e.message);
+    }
+  }
+
+  // Load orientations (ContextScene or CCOrientations) with IIIF
+  if (orientationItems.length > 0) {
+    const oi = orientationItems[0];
+    log("Loading " + orientationType + " via IIIF: " + oi.displayName + "...");
+    try {
+      const collection = await Cesium.ITwinData.createProjectedImageCollectionForRealityDataId({
+        iTwinId: ITWIN_ID,
+        realityDataId: oi.id,
+        imageRealityDataId: imageItems.length > 0 ? imageItems[0].id : undefined,
+        iiifBaseUrl: IIIF_BASE_URL,
+        defaultPlaneDistance: 10.0,
+        showFrustums: true,
+        showCameraIcons: true,
+        showLabels: true,
+        alpha: 1.0,
+        frustumColor: Cesium.Color.WHITE,
+      });
+      scene.primitives.add(collection);
+      log("  ✓ " + collection.length + " projected images loaded via IIIF");
+      log("  IIIF server: " + IIIF_BASE_URL);
+
+      const handler = new Cesium.ProjectedImageCollectionHandler(collection, scene, {
+        enabled: true,
+        hysteresis: 0.01,
+        threshold: 0.05,
+        splitMode: true,
+        rotationOffset: 0,
+      });
+      window._overlayHandler = handler;
+
+      // Fixed 50/50 split — show static divider line
+      const slider = document.getElementById("splitSlider");
+      slider.style.display = "block";
+      scene.splitPosition = 0.5;
+      slider.style.left = "50%";
+
+      // Alpha slider
+      const alphaControl = document.getElementById("alphaControl");
+      alphaControl.style.display = "block";
+      const alphaSlider = document.getElementById("alphaSlider");
+      const alphaValue = document.getElementById("alphaValue");
+      alphaSlider.addEventListener("input", function () {
+        handler.overlayAlpha = parseFloat(alphaSlider.value);
+        alphaValue.textContent = parseFloat(alphaSlider.value).toFixed(2);
+      });
+
+      // Roll offset slider
+      const rollOffsetSlider = document.getElementById("rollOffsetSlider");
+      const rollOffsetValue = document.getElementById("rollOffsetValue");
+      rollOffsetSlider.addEventListener("input", function () {
+        handler.rotationOffset = parseFloat(rollOffsetSlider.value);
+        rollOffsetValue.textContent = parseFloat(rollOffsetSlider.value).toFixed(1);
+      });
+
+      // Status HUD
+      scene.preRender.addEventListener(function () {
+        const best = handler.currentBestItem;
+        if (best) {
+          const score = Cesium.ProjectedImageCollection.computeViewScore(
+            best, scene.camera, handler.weights
+          ).toFixed(3);
+          const dist = Cesium.Cartesian3.distance(
+            scene.camera.positionWC, best.cameraPosition
+          ).toFixed(1);
+          document.getElementById("statusPanel").textContent =
+            "Active: " + (best.options.name || "?") + " (score: " + score + ", dist: " + dist + "m)";
+        }
+      });
+
+      log("\nSplit-screen inspect mode active.");
+      log("Drag the divider to resize panels.");
+      log("Double-click to set orbit pivot point.");
+
+    } catch (e) {
+      log("  ✗ " + e.message);
+      console.error(e);
+    }
+  } else {
+    log("No ContextScene or CCOrientations found in this iTwin.");
+  }
+
+  // Double-click to set scene center / orbit pivot point.
+  // After lookAt, use lookRight to shift the target from viewport center
+  // to the left panel center.  Track the angle to undo before next lookAt.
+  let appliedPanAngle = 0;
+  function computePanAngle() {
+    const fovy = viewer.camera.frustum.fovy;
+    const aspect = scene.canvas.clientWidth / scene.canvas.clientHeight;
+    const halfFovH = Math.atan(aspect * Math.tan(fovy / 2));
+    return Math.atan(0.5 * Math.tan(halfFovH));
+  }
+
+  const dblClickHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+  dblClickHandler.setInputAction(function (click) {
+    const cartesian = scene.pickPosition(click.position) ||
+      (function () {
+        const ray = viewer.camera.getPickRay(click.position);
+        return scene.globe.pick(ray, scene);
+      })();
+    if (Cesium.defined(cartesian)) {
+      // Undo previous lookRight before reading heading
+      if (appliedPanAngle !== 0) {
+        viewer.camera.lookLeft(appliedPanAngle);
+        appliedPanAngle = 0;
+      }
+
+      const carto = Cesium.Cartographic.fromCartesian(cartesian);
+      const distance = Cesium.Cartesian3.distance(viewer.camera.positionWC, cartesian);
+      const heading = viewer.camera.heading;
+      const pitch = viewer.camera.pitch;
+      viewer.camera.lookAt(
+        cartesian,
+        new Cesium.HeadingPitchRange(heading, pitch, distance)
+      );
+      viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+
+      // Shift camera right so the target appears at left panel center
+      const pan = computePanAngle();
+      viewer.camera.lookRight(pan);
+      appliedPanAngle = pan;
+
+      // Force image re-evaluation after the orbit center changes
+      if (window._overlayHandler) {
+        window._overlayHandler.resetSelection();
+      }
+      log("Pivot set at " +
+        Cesium.Math.toDegrees(carto.longitude).toFixed(6) + ", " +
+        Cesium.Math.toDegrees(carto.latitude).toFixed(6) + ", " +
+        carto.height.toFixed(1) + "m");
+    }
+  }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
+  log("\nZoom in/out to see LOD changes in Network tab.");
+  log("LOD levels: 256 → 512 → 1024 → 2048 → maxTexSize");
+  log("Double-click to set orbit pivot point.");
+}
+
+// =====================================================================
+// Init
+// =====================================================================
+(async () => {
+  // Handle OAuth callback
+  const wasCallback = await handleAuthCallback();
+  if (wasCallback) return; // page will reload
+
+  // Check for existing token
+  const token = getStoredToken();
+  if (token) {
+    startApp(token.access_token);
+  } else {
+    document.getElementById("loginStatus").textContent =
+      "Click above to sign in with your Bentley account";
+  }
+})();
+</script>
+</body>
+</html>

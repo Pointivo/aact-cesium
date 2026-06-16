@@ -1,0 +1,1189 @@
+import BillboardCollection from "./BillboardCollection.js";
+import buildModuleUrl from "../Core/buildModuleUrl.js";
+import Cartesian3 from "../Core/Cartesian3.js";
+import Cartographic from "../Core/Cartographic.js";
+import Check from "../Core/Check.js";
+import Color from "../Core/Color.js";
+import DebugCameraPrimitive from "./DebugCameraPrimitive.js";
+import defined from "../Core/defined.js";
+import destroyObject from "../Core/destroyObject.js";
+import Frozen from "../Core/Frozen.js";
+import HorizontalOrigin from "./HorizontalOrigin.js";
+import IIIFImageSource from "./IIIFImageSource.js";
+import LabelCollection from "./LabelCollection.js";
+import LabelStyle from "./LabelStyle.js";
+import Matrix3 from "../Core/Matrix3.js";
+import Matrix4 from "../Core/Matrix4.js";
+import PerspectiveFrustum from "../Core/PerspectiveFrustum.js";
+import PrimitiveCollection from "./PrimitiveCollection.js";
+import ProjectedImagePrimitive from "./ProjectedImagePrimitive.js";
+import Resource from "../Core/Resource.js";
+import Transforms from "../Core/Transforms.js";
+import VerticalOrigin from "./VerticalOrigin.js";
+
+const ProjectionType = ProjectedImagePrimitive.ProjectionType;
+
+/**
+ * A collection that manages multiple {@link ProjectedImagePrimitive} instances along
+ * with camera icon billboards and optional frustum wireframes.
+ *
+ * Can be populated manually via {@link ProjectedImageCollection#add}, or from
+ * a ccOrientations XML file via the static {@link ProjectedImageCollection.fromCCOrientationsXml}
+ * method.
+ *
+ * Added to the scene as a primitive:
+ * ```
+ * scene.primitives.add(projectedImageCollection);
+ * ```
+ *
+ * @alias ProjectedImageCollection
+ * @constructor
+ *
+ * @param {object} [options] Object with the following properties:
+ * @param {boolean} [options.show=true] Whether the collection is visible.
+ * @param {boolean} [options.showFrustums=true] Whether to display camera frustum wireframes.
+ * @param {boolean} [options.showCameraIcons=true] Whether to display camera icon billboards.
+ * @param {boolean} [options.showLabels=false] Whether to display labels at camera positions.
+ * @param {Color} [options.frustumColor=Color.YELLOW] Color for frustum wireframes.
+ * @param {number} [options.defaultPlaneDistance=50.0] Default planeDistance when not specified per image.
+ *
+ * @experimental This feature is not final and is subject to change without Cesium's standard deprecation policy.
+ */
+function ProjectedImageCollection(options) {
+  options = options ?? Frozen.EMPTY_OBJECT;
+
+  this._primitiveCollection = new PrimitiveCollection();
+  this._billboards = new BillboardCollection();
+  this._labels = new LabelCollection();
+  this._frustumCollection = new PrimitiveCollection();
+  this._items = []; // array of { primitive, billboard, label, frustumPrimitive, options }
+
+  this._primitiveCollection.add(this._billboards);
+  this._primitiveCollection.add(this._labels);
+  this._primitiveCollection.add(this._frustumCollection);
+
+  this._show = options.show ?? true;
+  this._showFrustums = options.showFrustums ?? true;
+  this._showCameraIcons = options.showCameraIcons ?? true;
+  this._showLabels = options.showLabels ?? false;
+  this._frustumColor = Color.clone(options.frustumColor ?? Color.YELLOW);
+  this._defaultPlaneDistance = options.defaultPlaneDistance ?? 50.0;
+  this._frustumScale = options.frustumScale ?? 1.0;
+
+  this._cameraIconUrl = buildModuleUrl("Assets/Textures/maki/camera.png");
+}
+
+Object.defineProperties(ProjectedImageCollection.prototype, {
+  /**
+   * Gets the number of projected images in the collection.
+   * @memberof ProjectedImageCollection.prototype
+   * @type {number}
+   * @readonly
+   */
+  length: {
+    get: function () {
+      return this._items.length;
+    },
+  },
+
+  /**
+   * Gets or sets visibility of the entire collection.
+   * @memberof ProjectedImageCollection.prototype
+   * @type {boolean}
+   */
+  show: {
+    get: function () {
+      return this._show;
+    },
+    set: function (value) {
+      this._show = value;
+      this._primitiveCollection.show = value;
+    },
+  },
+
+  /**
+   * Gets or sets whether frustum wireframes are shown.
+   * @memberof ProjectedImageCollection.prototype
+   * @type {boolean}
+   */
+  showFrustums: {
+    get: function () {
+      return this._showFrustums;
+    },
+    set: function (value) {
+      this._showFrustums = value;
+      this._frustumCollection.show = value;
+    },
+  },
+
+  /**
+   * Gets or sets whether camera icon billboards are shown.
+   * @memberof ProjectedImageCollection.prototype
+   * @type {boolean}
+   */
+  showCameraIcons: {
+    get: function () {
+      return this._showCameraIcons;
+    },
+    set: function (value) {
+      this._showCameraIcons = value;
+      this._billboards.show = value;
+    },
+  },
+
+  /**
+   * Gets or sets whether camera labels are shown.
+   * @memberof ProjectedImageCollection.prototype
+   * @type {boolean}
+   */
+  showLabels: {
+    get: function () {
+      return this._showLabels;
+    },
+    set: function (value) {
+      this._showLabels = value;
+      this._labels.show = value;
+    },
+  },
+});
+
+/**
+ * Add a projected image to the collection.
+ *
+ * @param {object} options Object with the following properties:
+ * @param {Cartesian3} options.cameraPosition Camera world-space position.
+ * @param {Matrix3} options.cameraRotation Camera-to-world rotation matrix (columns = right, up, forward).
+ * @param {string|HTMLImageElement|HTMLCanvasElement} options.image The image to project.
+ * @param {number} options.imageWidth Image width in pixels.
+ * @param {number} options.imageHeight Image height in pixels.
+ * @param {number} options.fx Focal length x in pixels.
+ * @param {number} options.fy Focal length y in pixels.
+ * @param {number} options.cx Principal point x in pixels.
+ * @param {number} options.cy Principal point y in pixels.
+ * @param {number} [options.skew=0] Skew coefficient.
+ * @param {number[]} [options.distortion] Distortion coefficients.
+ * @param {ProjectionType} [options.projectionType=ProjectionType.PINHOLE] Distortion model.
+ * @param {number} [options.planeDistance] Distance to the projection plane. Defaults to collection default.
+ * @param {number} [options.alpha=1.0] Image opacity.
+ * @param {string} [options.name] Display name for the camera label.
+ * @param {object} [options.id] User-defined pick id.
+ * @returns {object} An item handle with {primitive, billboard, label, frustumPrimitive}.
+ */
+ProjectedImageCollection.prototype.add = function (options) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.object("options", options);
+  Check.typeOf.object("options.cameraPosition", options.cameraPosition);
+  Check.typeOf.object("options.cameraRotation", options.cameraRotation);
+  Check.defined("options.image", options.image);
+  Check.typeOf.number("options.imageWidth", options.imageWidth);
+  Check.typeOf.number("options.imageHeight", options.imageHeight);
+  Check.typeOf.number("options.fx", options.fx);
+  Check.typeOf.number("options.fy", options.fy);
+  Check.typeOf.number("options.cx", options.cx);
+  Check.typeOf.number("options.cy", options.cy);
+  //>>includeEnd('debug');
+
+  const planeDistance = options.planeDistance ?? this._defaultPlaneDistance;
+  const projectionType = options.projectionType ?? ProjectionType.PINHOLE;
+
+  // Create the projected image primitive
+  const primitive = new ProjectedImagePrimitive({
+    cameraPosition: options.cameraPosition,
+    cameraRotation: options.cameraRotation,
+    image: options.image,
+    imageWidth: options.imageWidth,
+    imageHeight: options.imageHeight,
+    fx: options.fx,
+    fy: options.fy,
+    cx: options.cx,
+    cy: options.cy,
+    skew: options.skew,
+    distortion: options.distortion,
+    projectionType: projectionType,
+    planeDistance: planeDistance,
+    alpha: options.alpha,
+    id: options.id,
+    iiifImageSource: options.iiifImageSource,
+  });
+  this._primitiveCollection.add(primitive);
+
+  // Camera icon billboard — id is set to the item below after creation
+  const billboard = this._billboards.add({
+    position: options.cameraPosition,
+    image: this._cameraIconUrl,
+    width: 32,
+    height: 32,
+    verticalOrigin: VerticalOrigin.CENTER,
+    horizontalOrigin: HorizontalOrigin.CENTER,
+  });
+
+  // Camera label
+  const label = this._labels.add({
+    position: options.cameraPosition,
+    text: options.name ?? "",
+    font: "12px sans-serif",
+    style: LabelStyle.FILL_AND_OUTLINE,
+    outlineWidth: 2,
+    verticalOrigin: VerticalOrigin.BOTTOM,
+    pixelOffset: { x: 0, y: -24 },
+    show: this._showLabels && defined(options.name),
+  });
+
+  // Frustum wireframe
+  const forward = new Cartesian3();
+  Matrix3.getColumn(options.cameraRotation, 2, forward);
+  const camUp = new Cartesian3();
+  Matrix3.getColumn(options.cameraRotation, 1, camUp);
+  const camRight = new Cartesian3();
+  Matrix3.getColumn(options.cameraRotation, 0, camRight);
+
+  const fovX = 2.0 * Math.atan(options.imageWidth / (2.0 * options.fx));
+  const aspectRatio = options.imageWidth / options.imageHeight;
+  const debugFrustum = new PerspectiveFrustum();
+  debugFrustum.fov = fovX;
+  debugFrustum.aspectRatio = aspectRatio;
+  debugFrustum.near = 0.1 * this._frustumScale;
+  debugFrustum.far = planeDistance * this._frustumScale;
+
+  const cameraProxy = {
+    positionWC: Cartesian3.clone(options.cameraPosition),
+    directionWC: forward,
+    upWC: camUp,
+    rightWC: camRight,
+    frustum: debugFrustum,
+  };
+
+  const frustumPrimitive = new DebugCameraPrimitive({
+    camera: cameraProxy,
+    color: this._frustumColor,
+    updateOnChange: false,
+    showPlanes: false,
+  });
+  this._frustumCollection.add(frustumPrimitive);
+
+  const item = {
+    primitive: primitive,
+    billboard: billboard,
+    label: label,
+    frustumPrimitive: frustumPrimitive,
+    cameraPosition: Cartesian3.clone(options.cameraPosition),
+    cameraDirection: Cartesian3.clone(forward),
+    cameraUp: Cartesian3.clone(camUp),
+    cameraRight: Cartesian3.clone(camRight),
+    show: true,
+    options: options,
+  };
+
+  // Set billboard id to the item so it can be picked and traced back
+  billboard.id = item;
+
+  this._items.push(item);
+
+  return item;
+};
+
+/**
+ * Remove a projected image item from the collection.
+ * @param {object} item The item handle returned by {@link ProjectedImageCollection#add}.
+ * @returns {boolean} true if the item was found and removed.
+ */
+ProjectedImageCollection.prototype.remove = function (item) {
+  const index = this._items.indexOf(item);
+  if (index === -1) {
+    return false;
+  }
+
+  this._primitiveCollection.remove(item.primitive);
+  this._billboards.remove(item.billboard);
+  this._labels.remove(item.label);
+  if (defined(item.frustumPrimitive)) {
+    this._frustumCollection.remove(item.frustumPrimitive);
+  }
+
+  this._items.splice(index, 1);
+  return true;
+};
+
+/**
+ * Remove all projected images from the collection.
+ */
+ProjectedImageCollection.prototype.removeAll = function () {
+  for (let i = this._items.length - 1; i >= 0; i--) {
+    this.remove(this._items[i]);
+  }
+};
+
+/**
+ * Show or hide an individual projected image item.
+ *
+ * @param {object} item The item handle returned by {@link ProjectedImageCollection#add}.
+ * @param {boolean} visible Whether the item should be visible.
+ */
+ProjectedImageCollection.prototype.setItemShow = function (item, visible) {
+  item.show = visible;
+  item.primitive.show = visible;
+  item.billboard.show = visible && this._showCameraIcons;
+  item.label.show = visible && this._showLabels && item.label.text !== "";
+  if (defined(item.frustumPrimitive)) {
+    item.frustumPrimitive.show = visible && this._showFrustums;
+  }
+};
+
+/**
+ * Get the projected image item at the given index.
+ * @param {number} index Zero-based index.
+ * @returns {object} The item handle.
+ */
+ProjectedImageCollection.prototype.get = function (index) {
+  return this._items[index];
+};
+
+/**
+ * Find the collection item associated with a pick result.
+ * Works for billboards, labels, or any picked object whose id is an item.
+ *
+ * @param {object} pickedObject The object returned by scene.pick().
+ * @returns {object|undefined} The item handle, or undefined if not from this collection.
+ */
+ProjectedImageCollection.prototype.getItemFromPick = function (pickedObject) {
+  if (!defined(pickedObject) || !defined(pickedObject.id)) {
+    return undefined;
+  }
+  const candidate = pickedObject.id;
+  if (this._items.indexOf(candidate) !== -1) {
+    return candidate;
+  }
+  return undefined;
+};
+
+/**
+ * @private
+ */
+ProjectedImageCollection.prototype.update = function (frameState) {
+  if (!this._show) {
+    return;
+  }
+  this._primitiveCollection.update(frameState);
+};
+
+/**
+ * Returns true if this object was destroyed.
+ * @returns {boolean}
+ */
+ProjectedImageCollection.prototype.isDestroyed = function () {
+  return false;
+};
+
+/**
+ * Destroy this collection and all resources.
+ */
+ProjectedImageCollection.prototype.destroy = function () {
+  this._primitiveCollection.destroy();
+  return destroyObject(this);
+};
+
+// ---------------------------------------------------------------------------
+// View scoring
+// ---------------------------------------------------------------------------
+
+const scratchToCamera = new Cartesian3();
+const scratchToTarget = new Cartesian3();
+const scratchCol = new Cartesian3();
+const scratchReflected = new Cartesian3();
+const scratchUpEcef = new Cartesian3();
+
+/**
+ * Compute a 0–1 score indicating how well a projected image item matches
+ * the current viewer camera. Higher scores mean better alignment.
+ *
+ * When a `targetPoint` is provided (e.g. an orbit pivot), the score is based
+ * on whether the source camera was looking at the target and how close it was.
+ * This produces stable scores independent of the viewer's position, preventing
+ * feedback loops when snapping to an image moves the viewer camera.
+ *
+ * Without a target point, the score uses viewer direction alignment and
+ * viewer-to-camera proximity (the original heuristic).
+ *
+ * @param {object} item An item from the collection.
+ * @param {Camera} viewerCamera The viewer's camera (e.g. `viewer.camera`).
+ * @param {object} [weights] Scoring weights.
+ * @param {number} [weights.alignment=0.7] Weight for directional alignment / target coverage (0–1).
+ * @param {number} [weights.distance=0.3] Weight for proximity (0–1).
+ * @param {Cartesian3} [targetPoint] Optional point of interest (e.g. orbit center).
+ * @returns {number} Score in approximately [0, 1]. Higher is better.
+ */
+ProjectedImageCollection.computeViewScore = function (
+  item,
+  viewerCamera,
+  weights,
+  targetPoint,
+) {
+  const wAlign = (weights && weights.alignment) ?? 0.7;
+  const wDist = (weights && weights.distance) ?? 0.3;
+  const refDist = item.options.planeDistance ?? 50.0;
+
+  if (defined(targetPoint)) {
+    // Coverage: source camera points toward the target
+    Cartesian3.subtract(targetPoint, item.cameraPosition, scratchToTarget);
+    const distToTarget = Cartesian3.magnitude(scratchToTarget);
+    if (distToTarget > 0) {
+      Cartesian3.divideByScalar(scratchToTarget, distToTarget, scratchToTarget);
+    }
+    const coverageDot = Cartesian3.dot(item.cameraDirection, scratchToTarget);
+    const coverageScore = (coverageDot + 1.0) * 0.5;
+
+    // Viewer alignment: source camera looks in a similar direction to the
+    // current viewer so the selected image matches the viewer's perspective.
+    const alignDot = Cartesian3.dot(
+      viewerCamera.directionWC,
+      item.cameraDirection,
+    );
+    const alignScore = (alignDot + 1.0) * 0.5;
+
+    // Distance from source camera to target
+    const distanceScore = refDist / (refDist + distToTarget);
+
+    // Coverage acts as a gate: cameras not seeing the target score low.
+    // Among cameras that do see it, alignment picks the matching viewpoint.
+    return coverageScore * (wAlign * alignScore + wDist * distanceScore);
+  }
+
+  // Fallback: viewer-based scoring
+  const viewerDir = viewerCamera.directionWC;
+  const camDir = item.cameraDirection;
+  const dot = Cartesian3.dot(viewerDir, camDir);
+  const alignmentScore = (dot + 1.0) * 0.5;
+
+  Cartesian3.subtract(
+    item.cameraPosition,
+    viewerCamera.positionWC,
+    scratchToCamera,
+  );
+  const dist = Cartesian3.magnitude(scratchToCamera);
+  const distanceScore = refDist / (refDist + dist);
+
+  return wAlign * alignmentScore + wDist * distanceScore;
+};
+
+// ---------------------------------------------------------------------------
+// ccOrientations XML parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a ccOrientations XML string and populate a ProjectedImageCollection.
+ *
+ * @param {string} xmlString The ccOrientations XML content.
+ * @param {object} options Object with the following properties:
+ * @param {Function} options.resolveImageUrl A function that receives an ImagePath string
+ *   and returns a URL (string) or Promise&lt;string&gt; for the image resource.
+ * @param {number} [options.defaultPlaneDistance=50.0] Default projection plane distance.
+ * @param {boolean} [options.showFrustums=true] Show frustum wireframes.
+ * @param {boolean} [options.showCameraIcons=true] Show camera icons.
+ * @param {boolean} [options.showLabels=false] Show camera labels.
+ * @param {Color} [options.frustumColor=Color.YELLOW] Frustum wireframe color.
+ * @param {number} [options.alpha=1.0] Default image alpha.
+ * @returns {Promise<ProjectedImageCollection>}
+ */
+ProjectedImageCollection.fromCCOrientationsXml = async function (
+  xmlString,
+  options,
+) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.string("xmlString", xmlString);
+  Check.typeOf.object("options", options);
+  Check.typeOf.func("options.resolveImageUrl", options.resolveImageUrl);
+  //>>includeEnd('debug');
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlString, "application/xml");
+
+  const collection = new ProjectedImageCollection({
+    defaultPlaneDistance: options.defaultPlaneDistance ?? 50.0,
+    frustumScale: options.frustumScale,
+    showFrustums: options.showFrustums,
+    showCameraIcons: options.showCameraIcons,
+    showLabels: options.showLabels,
+    frustumColor: options.frustumColor,
+  });
+
+  const blocks = doc.querySelectorAll("Block");
+  for (const block of blocks) {
+    const photogroups = block.querySelectorAll("Photogroup");
+    for (const photogroup of photogroups) {
+      const pgParams = parsePhotogroupIntrinsics(photogroup);
+      const photos = photogroup.querySelectorAll("Photo");
+
+      for (const photo of photos) {
+        const pose = photo.querySelector("Pose");
+        if (!pose) {
+          continue;
+        }
+
+        const rotation = pose.querySelector("Rotation");
+        const center = pose.querySelector("Center");
+        if (!rotation || !center) {
+          continue;
+        }
+
+        // Parse pose
+        // BlocksExchange stores world→camera rotation (standard CV convention).
+        // parseRotationMatrix transposes to camera→world (columns = camera axes in ECEF).
+        const cameraToWorld = parseRotationMatrix(rotation);
+
+        // Handle CameraOrientation convention
+        // Default is XRightYDown: camera X = right, Y = down
+        // Our convention: columns = [right, up, forward]
+        // For XRightYDown: right = col0, up = -col1, forward = col2
+        const cameraOrientation = getTextContent(
+          photogroup,
+          "CameraOrientation",
+          "XRightYDown",
+        );
+        adjustRotationForCameraOrientation(cameraToWorld, cameraOrientation);
+
+        const cx = parseFloat(getTextContent(center, "x", "0"));
+        const cy = parseFloat(getTextContent(center, "y", "0"));
+        const cz = parseFloat(getTextContent(center, "z", "0"));
+        const cameraPosition = new Cartesian3(cx, cy, cz);
+
+        // Compute focal length in pixels
+        const fxPx = pgParams.focalLengthPx;
+        const fyPx = pgParams.focalLengthPx;
+        const ppX = pgParams.principalPointX;
+        const ppY = pgParams.principalPointY;
+
+        // Resolve image URL
+        const imagePath = getTextContent(photo, "ImagePath", "");
+        const photoId = getTextContent(photo, "Id", "");
+        let imageUrl;
+        try {
+          imageUrl = await options.resolveImageUrl(imagePath);
+        } catch {
+          continue;
+        }
+
+        const planeDistance =
+          options.defaultPlaneDistance ?? collection._defaultPlaneDistance;
+
+        // Create IIIFImageSource when in IIIF mode
+        let iiifImageSource;
+        if (defined(options.iiifBaseUrl)) {
+          const normalized = imagePath.replace(/\\/g, "/");
+          const stem = normalized
+            .split("/")
+            .pop()
+            .replace(/\.[^.]+$/, "");
+          iiifImageSource = new IIIFImageSource({
+            iiifImageBase: `${options.iiifBaseUrl}/${options.iTwinId}/${stem}`,
+            imageWidth: pgParams.imageWidth,
+            imageHeight: pgParams.imageHeight,
+            authHeader: options.authHeader,
+          });
+        }
+
+        collection.add({
+          cameraPosition: cameraPosition,
+          cameraRotation: cameraToWorld,
+          image: imageUrl,
+          imageWidth: pgParams.imageWidth,
+          imageHeight: pgParams.imageHeight,
+          fx: fxPx,
+          fy: fyPx,
+          cx: ppX,
+          cy: ppY,
+          distortion: pgParams.distortion,
+          projectionType: pgParams.projectionType,
+          planeDistance: planeDistance,
+          alpha: options.alpha ?? 1.0,
+          iiifImageSource: iiifImageSource,
+          name: `Photo ${photoId}`,
+          id: `photo-${photoId}`,
+        });
+      }
+    }
+  }
+
+  return collection;
+};
+
+// ---------------------------------------------------------------------------
+// Internal XML helpers
+// ---------------------------------------------------------------------------
+
+function getTextContent(parent, tagName, defaultValue) {
+  const el = parent.querySelector(tagName);
+  if (el && el.textContent) {
+    return el.textContent.trim();
+  }
+  return defaultValue;
+}
+
+function parseFloatTag(parent, tagName, defaultValue) {
+  const text = getTextContent(parent, tagName, null);
+  if (text === null) {
+    return defaultValue;
+  }
+  return parseFloat(text);
+}
+
+function parseRotationMatrix(rotationEl) {
+  const m00 = parseFloatTag(rotationEl, "M_00", 1);
+  const m01 = parseFloatTag(rotationEl, "M_01", 0);
+  const m02 = parseFloatTag(rotationEl, "M_02", 0);
+  const m10 = parseFloatTag(rotationEl, "M_10", 0);
+  const m11 = parseFloatTag(rotationEl, "M_11", 1);
+  const m12 = parseFloatTag(rotationEl, "M_12", 0);
+  const m20 = parseFloatTag(rotationEl, "M_20", 0);
+  const m21 = parseFloatTag(rotationEl, "M_21", 0);
+  const m22 = parseFloatTag(rotationEl, "M_22", 1);
+
+  // BlocksExchange M_ij = row i, col j in world→camera convention.
+  // Matrix3 constructor takes row-major visual layout, so this faithfully
+  // reconstructs the world→camera matrix. Transpose to get camera→world
+  // (columns = camera axes in ECEF).
+  return Matrix3.transpose(
+    new Matrix3(m00, m01, m02, m10, m11, m12, m20, m21, m22),
+    new Matrix3(),
+  );
+}
+
+function parsePhotogroupIntrinsics(photogroup) {
+  const imageDimEl = photogroup.querySelector("ImageDimensions");
+  const imageWidth = imageDimEl
+    ? parseInt(getTextContent(imageDimEl, "Width", "1"), 10)
+    : 1;
+  const imageHeight = imageDimEl
+    ? parseInt(getTextContent(imageDimEl, "Height", "1"), 10)
+    : 1;
+
+  const focalLengthMm = parseFloatTag(photogroup, "FocalLength", 50);
+  const sensorSizeMm = parseFloatTag(photogroup, "SensorSize", 36);
+
+  // Focal length in pixels = FocalLength_mm * max(W, H) / SensorSize_mm
+  const largestDim = Math.max(imageWidth, imageHeight);
+  const focalLengthPx = (focalLengthMm / sensorSizeMm) * largestDim;
+
+  // Principal point (defaults to image center)
+  let principalPointX = imageWidth / 2;
+  let principalPointY = imageHeight / 2;
+  const ppEl = photogroup.querySelector("PrincipalPoint");
+  if (ppEl) {
+    principalPointX = parseFloatTag(ppEl, "x", principalPointX);
+    principalPointY = parseFloatTag(ppEl, "y", principalPointY);
+  }
+
+  // Distortion (Brown's model by default)
+  let distortion = [];
+  let projectionType = ProjectionType.PINHOLE;
+
+  const cameraModelType = getTextContent(
+    photogroup,
+    "CameraModelType",
+    "Perspective",
+  );
+  const distortionEl = photogroup.querySelector("Distortion");
+
+  if (cameraModelType === "Fisheye") {
+    projectionType = ProjectionType.FISHEYE;
+    const fisheyeDistEl = photogroup.querySelector("FisheyeDistortion");
+    if (fisheyeDistEl) {
+      distortion = [
+        parseFloatTag(fisheyeDistEl, "P0", 0),
+        parseFloatTag(fisheyeDistEl, "P1", 0),
+        parseFloatTag(fisheyeDistEl, "P2", 0),
+        parseFloatTag(fisheyeDistEl, "P3", 0),
+      ];
+    }
+  } else if (distortionEl) {
+    const k1 = parseFloatTag(distortionEl, "K1", 0);
+    const k2 = parseFloatTag(distortionEl, "K2", 0);
+    const k3 = parseFloatTag(distortionEl, "K3", 0);
+    const p1 = parseFloatTag(distortionEl, "P1", 0);
+    const p2 = parseFloatTag(distortionEl, "P2", 0);
+
+    if (k1 !== 0 || k2 !== 0 || k3 !== 0 || p1 !== 0 || p2 !== 0) {
+      if (p1 !== 0 || p2 !== 0 || k3 !== 0) {
+        projectionType = ProjectionType.BROWN_CONRADY;
+        distortion = [k1, k2, k3, p1, p2];
+      } else {
+        projectionType = ProjectionType.PERSPECTIVE_2;
+        distortion = [k1, k2];
+      }
+    }
+  }
+
+  return {
+    imageWidth: imageWidth,
+    imageHeight: imageHeight,
+    focalLengthPx: focalLengthPx,
+    principalPointX: principalPointX,
+    principalPointY: principalPointY,
+    distortion: distortion,
+    projectionType: projectionType,
+  };
+}
+
+/**
+ * Adjust the camera-to-world rotation matrix based on the CameraOrientation convention.
+ * Our internal convention uses columns = [right, up, forward].
+ * ccOrientations default is XRightYDown where camera X=right, Y=down, Z=forward.
+ * We need to negate the Y column (up = -down) to get our convention.
+ *
+ * @param {Matrix3} cameraToWorld The camera-to-world rotation to modify in place.
+ * @param {string} orientation The CameraOrientation string from ccOrientations.
+ * @private
+ */
+function adjustRotationForCameraOrientation(cameraToWorld, orientation) {
+  // For XRightYDown (default): column 0 = right, column 1 = down, column 2 = forward
+  // We need column 1 = up (= -down), so negate column 1
+  if (
+    orientation === "XRightYDown" ||
+    !defined(orientation) ||
+    orientation === ""
+  ) {
+    // Negate column 1 (indices 3, 4, 5 in column-major)
+    cameraToWorld[3] = -cameraToWorld[3];
+    cameraToWorld[4] = -cameraToWorld[4];
+    cameraToWorld[5] = -cameraToWorld[5];
+  }
+  // XRightYUp: column 0 = right, column 1 = up, column 2 = -forward
+  // Negate column 2 to get forward
+  else if (orientation === "XRightYUp") {
+    cameraToWorld[6] = -cameraToWorld[6];
+    cameraToWorld[7] = -cameraToWorld[7];
+    cameraToWorld[8] = -cameraToWorld[8];
+  }
+  // XLeftYDown: column 0 = -right, column 1 = down, column 2 = forward
+  // Negate col 0 and col 1
+  else if (orientation === "XLeftYDown") {
+    cameraToWorld[0] = -cameraToWorld[0];
+    cameraToWorld[1] = -cameraToWorld[1];
+    cameraToWorld[2] = -cameraToWorld[2];
+    cameraToWorld[3] = -cameraToWorld[3];
+    cameraToWorld[4] = -cameraToWorld[4];
+    cameraToWorld[5] = -cameraToWorld[5];
+  }
+  // XLeftYUp: column 0 = -right, column 1 = up, column 2 = -forward
+  // Negate col 0 and col 2
+  else if (orientation === "XLeftYUp") {
+    cameraToWorld[0] = -cameraToWorld[0];
+    cameraToWorld[1] = -cameraToWorld[1];
+    cameraToWorld[2] = -cameraToWorld[2];
+    cameraToWorld[6] = -cameraToWorld[6];
+    cameraToWorld[7] = -cameraToWorld[7];
+    cameraToWorld[8] = -cameraToWorld[8];
+  }
+  // Other orientations (XDownYRight, etc.) are rare — skip for now
+}
+
+/**
+ * Load a ccOrientations XML file from a URL and create a ProjectedImageCollection.
+ *
+ * @param {string|Resource} url URL to the ccOrientations XML file.
+ * @param {object} options Options passed to {@link ProjectedImageCollection.fromCCOrientationsXml}.
+ * @returns {Promise<ProjectedImageCollection>}
+ */
+ProjectedImageCollection.fromCCOrientationsUrl = async function (url, options) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.defined("url", url);
+  Check.typeOf.object("options", options);
+  //>>includeEnd('debug');
+
+  const resource = url instanceof Resource ? url : new Resource({ url: url });
+  const xmlString = await resource.fetchText();
+  return ProjectedImageCollection.fromCCOrientationsXml(xmlString, options);
+};
+
+// ---------------------------------------------------------------------------
+// ContextScene JSON parser
+// ---------------------------------------------------------------------------
+
+function opkToRotationMatrix(omega, phi, kappa) {
+  const co = Math.cos(omega);
+  const so = Math.sin(omega);
+  const cp = Math.cos(phi);
+  const sp = Math.sin(phi);
+  const ck = Math.cos(kappa);
+  const sk = Math.sin(kappa);
+
+  return new Matrix3(
+    cp * ck,
+    so * sp * ck - co * sk,
+    co * sp * ck + so * sk,
+    cp * sk,
+    so * sp * sk + co * ck,
+    co * sp * sk - so * ck,
+    -sp,
+    so * cp,
+    co * cp,
+  );
+}
+
+function parseContextSceneDevice(device) {
+  const dims = device.Dimensions || {};
+  const imageWidth = dims.Width || dims.width || 1;
+  const imageHeight = dims.Height || dims.height || 1;
+
+  const focalLengthPx = device.FocalLength || 1;
+
+  const pp = device.PrincipalPoint || {};
+  const principalPointX = pp.x ?? imageWidth / 2;
+  const principalPointY = pp.y ?? imageHeight / 2;
+
+  let distortion = [];
+  let projectionType = ProjectionType.PINHOLE;
+  const deviceType = (device.Type || "perspective").toLowerCase();
+
+  if (deviceType === "fisheye") {
+    projectionType = ProjectionType.FISHEYE;
+    const fd = device.FisheyeDistortion || {};
+    distortion = [fd.P0 || 0, fd.P1 || 0, fd.P2 || 0, fd.P3 || 0];
+  } else {
+    const rd = device.RadialDistortion || {};
+    const k1 = rd.k1 || 0;
+    const k2 = rd.k2 || 0;
+    const k3 = rd.k3 || 0;
+    const p1 = rd.p1 || 0;
+    const p2 = rd.p2 || 0;
+
+    if (k1 !== 0 || k2 !== 0 || k3 !== 0 || p1 !== 0 || p2 !== 0) {
+      if (p1 !== 0 || p2 !== 0 || k3 !== 0) {
+        projectionType = ProjectionType.BROWN_CONRADY;
+        distortion = [k1, k2, k3, p1, p2];
+      } else {
+        projectionType = ProjectionType.PERSPECTIVE_2;
+        distortion = [k1, k2];
+      }
+    }
+  }
+
+  return {
+    imageWidth,
+    imageHeight,
+    focalLengthPx,
+    principalPointX,
+    principalPointY,
+    distortion,
+    projectionType,
+  };
+}
+
+function isEcefSrs(def) {
+  return def === "EPSG:4978";
+}
+
+function isGeographicSrs(def) {
+  const d = (def || "").toUpperCase();
+  return d === "WGS84" || d === "EPSG:4326";
+}
+
+function contextSceneCenterToCartesian3(center, srsDef) {
+  if (isEcefSrs(srsDef)) {
+    return new Cartesian3(center.x, center.y, center.z);
+  }
+  if (isGeographicSrs(srsDef)) {
+    return Cartesian3.fromDegrees(center.x, center.y, center.z || 0);
+  }
+  console.warn(`ContextScene SRS "${srsDef}" not recognized, treating as ECEF`);
+  return new Cartesian3(center.x, center.y, center.z);
+}
+
+/**
+ * Create a ProjectedImageCollection from a ContextScene JSON object.
+ *
+ * @param {object} sceneData Parsed ContextScene JSON.
+ * @param {object} options Same options as fromCCOrientationsXml.
+ * @returns {Promise<ProjectedImageCollection>}
+ */
+ProjectedImageCollection.fromContextSceneJson = async function (
+  sceneData,
+  options,
+) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.typeOf.object("sceneData", sceneData);
+  Check.typeOf.object("options", options);
+  Check.typeOf.func("options.resolveImageUrl", options.resolveImageUrl);
+  //>>includeEnd('debug');
+
+  const collection = new ProjectedImageCollection({
+    defaultPlaneDistance: options.defaultPlaneDistance ?? 50.0,
+    frustumScale: options.frustumScale,
+    showFrustums: options.showFrustums,
+    showCameraIcons: options.showCameraIcons,
+    showLabels: options.showLabels,
+    frustumColor: options.frustumColor,
+  });
+
+  const pc = sceneData.PhotoCollection;
+  if (!defined(pc)) {
+    return collection;
+  }
+
+  const srsMap = sceneData.SpatialReferenceSystems || {};
+  const pcSrsId = String(pc.SRSId ?? "0");
+  const srsDef = srsMap[pcSrsId]?.Definition || "EPSG:4978";
+
+  const devices = {};
+  const rawDevices = pc.Devices || {};
+  for (const [id, dev] of Object.entries(rawDevices)) {
+    devices[id] = parseContextSceneDevice(dev);
+  }
+
+  const poses = pc.Poses || {};
+  const photos = pc.Photos || {};
+
+  for (const [photoId, photo] of Object.entries(photos)) {
+    const deviceId = String(photo.DeviceId ?? "");
+    const poseId = String(photo.PoseId ?? "");
+
+    const device = devices[deviceId];
+    const pose = poses[poseId];
+
+    if (!defined(device) || !defined(pose) || !defined(pose.Center)) {
+      continue;
+    }
+
+    const rot = pose.Rotation;
+    if (!defined(rot)) {
+      continue;
+    }
+
+    // Debug: dump raw Rotation object structure for first camera
+    if (collection._items.length === 0 && !collection._debugDumped) {
+      collection._debugDumped = true;
+      console.log(`[DEBUG] Raw pose.Rotation keys:`, Object.keys(rot));
+      console.log(`[DEBUG] Raw pose.Rotation:`, JSON.stringify(rot));
+      console.log(`[DEBUG] Raw pose.Center:`, JSON.stringify(pose.Center));
+      console.log(`[DEBUG] Raw pose keys:`, Object.keys(pose));
+    }
+
+    const cameraPosition = contextSceneCenterToCartesian3(pose.Center, srsDef);
+
+    // ENU→ECEF is needed for the heading fix and for geographic-SRS data.
+    const enuToEcef4 = Transforms.eastNorthUpToFixedFrame(cameraPosition);
+    const enuToEcef3 = Matrix4.getMatrix3(enuToEcef4, new Matrix3());
+
+    let cameraToWorld;
+    if (isEcefSrs(srsDef)) {
+      // ECEF SRS (e.g. Calib): OPK encodes Rx(ω)*Ry(φ)*Rz(κ) = camera→ECEF
+      // in XRightYDownZForward convention. We obtain R_xyz via
+      // transpose(Rz(-κ)*Ry(-φ)*Rx(-ω)).
+      const opkNeg = opkToRotationMatrix(
+        -(rot.omega || 0),
+        -(rot.phi || 0),
+        -(rot.kappa || 0),
+      );
+      cameraToWorld = Matrix3.transpose(opkNeg, new Matrix3());
+      // Negate col1 (camera-down → camera-up) for CesiumJS convention
+      // → result is [right, up, forward].
+      const col1 = Matrix3.getColumn(cameraToWorld, 1, new Cartesian3());
+      Cartesian3.negate(col1, col1);
+      Matrix3.setColumn(cameraToWorld, 1, col1, cameraToWorld);
+    } else {
+      // Geographic SRS (e.g. FIP): OPK = Rz(κ)*Ry(φ)*Rx(ω) maps ENU→camera
+      // in XRightYUpZBackward convention. camera→ECEF = enuToEcef * R^T.
+      const opkMatrix = opkToRotationMatrix(
+        rot.omega || 0,
+        rot.phi || 0,
+        rot.kappa || 0,
+      );
+      const opkTransposed = Matrix3.transpose(opkMatrix, new Matrix3());
+      cameraToWorld = Matrix3.multiply(
+        enuToEcef3,
+        opkTransposed,
+        new Matrix3(),
+      );
+      // Fix 180° heading error: horizontally reflect cols 1 and 2
+      // (negate horizontal component, keep vertical) to convert
+      // backward→forward → result is [right, up, forward].
+      const upEcef = Matrix3.getColumn(enuToEcef3, 2, scratchUpEcef);
+      for (const colIdx of [1, 2]) {
+        const col = Matrix3.getColumn(cameraToWorld, colIdx, scratchCol);
+        const dotUp = Cartesian3.dot(col, upEcef);
+        Cartesian3.multiplyByScalar(upEcef, 2 * dotUp, scratchReflected);
+        Cartesian3.subtract(scratchReflected, col, scratchReflected);
+        Matrix3.setColumn(
+          cameraToWorld,
+          colIdx,
+          scratchReflected,
+          cameraToWorld,
+        );
+      }
+    }
+
+    // Debug: collect orientation stats for all cameras
+    if (!collection._debugStats) {
+      collection._debugStats = {
+        cameras: [],
+        minAlt: Infinity,
+        maxAlt: -Infinity,
+      };
+    }
+    {
+      const fwd = new Cartesian3();
+      Matrix3.getColumn(cameraToWorld, 2, fwd);
+      const carto = Cartographic.fromCartesian(cameraPosition);
+      const altM = carto.height;
+      const ecefToEnu = Matrix3.transpose(enuToEcef3, new Matrix3());
+      const localFwd = Matrix3.multiplyByVector(
+        ecefToEnu,
+        fwd,
+        new Cartesian3(),
+      );
+      const pitchDeg =
+        Math.atan2(
+          localFwd.z,
+          Math.sqrt(localFwd.x * localFwd.x + localFwd.y * localFwd.y),
+        ) *
+        (180 / Math.PI);
+      collection._debugStats.cameras.push({
+        id: photoId,
+        alt: altM,
+        pitchDeg,
+        enuFwd: { e: localFwd.x, n: localFwd.y, u: localFwd.z },
+        opk: [rot.omega || 0, rot.phi || 0, rot.kappa || 0],
+      });
+      collection._debugStats.minAlt = Math.min(
+        collection._debugStats.minAlt,
+        altM,
+      );
+      collection._debugStats.maxAlt = Math.max(
+        collection._debugStats.maxAlt,
+        altM,
+      );
+    }
+
+    const imagePath = photo.ImagePath || "";
+    const colonIdx = imagePath.indexOf(":");
+    const cleanPath =
+      colonIdx >= 0 ? imagePath.substring(colonIdx + 1) : imagePath;
+
+    let imageUrl;
+    try {
+      imageUrl = await options.resolveImageUrl(cleanPath);
+    } catch {
+      continue;
+    }
+
+    let iiifImageSource;
+    if (defined(options.iiifBaseUrl)) {
+      const stem = cleanPath.replace(/\.[^.]+$/, "");
+      iiifImageSource = new IIIFImageSource({
+        iiifImageBase: `${options.iiifBaseUrl}/${options.iTwinId}/${stem}`,
+        imageWidth: device.imageWidth,
+        imageHeight: device.imageHeight,
+        authHeader: options.authHeader,
+      });
+    }
+
+    const planeDistance =
+      pose.MedianDepth ||
+      options.defaultPlaneDistance ||
+      collection._defaultPlaneDistance;
+
+    collection.add({
+      cameraPosition: cameraPosition,
+      cameraRotation: cameraToWorld,
+      image: imageUrl,
+      imageWidth: device.imageWidth,
+      imageHeight: device.imageHeight,
+      fx: device.focalLengthPx,
+      fy: device.focalLengthPx,
+      cx: device.principalPointX,
+      cy: device.principalPointY,
+      distortion: device.distortion,
+      projectionType: device.projectionType,
+      planeDistance: planeDistance,
+      alpha: options.alpha ?? 1.0,
+      iiifImageSource: iiifImageSource,
+      name: `Photo ${photoId}`,
+      id: `photo-${photoId}`,
+    });
+  }
+
+  // Debug: dump orientation summary
+  if (collection._debugStats) {
+    const stats = collection._debugStats;
+    const cams = stats.cameras;
+    cams.sort((a, b) => a.alt - b.alt);
+    console.log(`[DEBUG] Orientation summary for ${cams.length} cameras:`);
+    console.log(
+      `[DEBUG] Altitude range: ${stats.minAlt.toFixed(1)}m - ${stats.maxAlt.toFixed(1)}m`,
+    );
+
+    const range = stats.maxAlt - stats.minAlt;
+    const buckets = [
+      {
+        label: "lowest 10%",
+        cams: cams.filter((c) => c.alt <= stats.minAlt + range * 0.1),
+      },
+      {
+        label: "middle 40-60%",
+        cams: cams.filter(
+          (c) =>
+            c.alt > stats.minAlt + range * 0.4 &&
+            c.alt <= stats.minAlt + range * 0.6,
+        ),
+      },
+      {
+        label: "highest 10%",
+        cams: cams.filter((c) => c.alt > stats.minAlt + range * 0.9),
+      },
+    ];
+    for (const b of buckets) {
+      if (b.cams.length === 0) {
+        continue;
+      }
+      const avgPitch =
+        b.cams.reduce((s, c) => s + c.pitchDeg, 0) / b.cams.length;
+      const sample = b.cams[Math.floor(b.cams.length / 2)];
+      console.log(
+        `[DEBUG] ${b.label}: ${b.cams.length} cams, avgPitch=${avgPitch.toFixed(1)}°, ` +
+          `sampleAlt=${sample.alt.toFixed(1)}m, samplePitch=${sample.pitchDeg.toFixed(1)}°, ` +
+          `OPK=(${sample.opk.map((v) => v.toFixed(3)).join(", ")}), ` +
+          `ENU fwd=(E:${sample.enuFwd.e.toFixed(3)}, N:${sample.enuFwd.n.toFixed(3)}, Up:${sample.enuFwd.u.toFixed(3)})`,
+      );
+    }
+
+    console.log(`[DEBUG] Lowest 3 cameras (expected: nearly horizontal):`);
+    for (let i = 0; i < Math.min(3, cams.length); i++) {
+      const c = cams[i];
+      console.log(
+        `[DEBUG]   cam ${c.id}: alt=${c.alt.toFixed(1)}m pitch=${c.pitchDeg.toFixed(1)}° OPK=(${c.opk.map((v) => v.toFixed(3)).join(", ")}) ENU fwd=(E:${c.enuFwd.e.toFixed(3)}, N:${c.enuFwd.n.toFixed(3)}, Up:${c.enuFwd.u.toFixed(3)})`,
+      );
+    }
+    console.log(
+      `[DEBUG] Highest 3 cameras (expected: looking down -45° to -90°):`,
+    );
+    for (let i = Math.max(0, cams.length - 3); i < cams.length; i++) {
+      const c = cams[i];
+      console.log(
+        `[DEBUG]   cam ${c.id}: alt=${c.alt.toFixed(1)}m pitch=${c.pitchDeg.toFixed(1)}° OPK=(${c.opk.map((v) => v.toFixed(3)).join(", ")}) ENU fwd=(E:${c.enuFwd.e.toFixed(3)}, N:${c.enuFwd.n.toFixed(3)}, Up:${c.enuFwd.u.toFixed(3)})`,
+      );
+    }
+    delete collection._debugStats;
+  }
+
+  return collection;
+};
+
+/**
+ * Load a ContextScene JSON file from a URL and create a ProjectedImageCollection.
+ *
+ * @param {string|Resource} url URL to the ContextScene JSON file.
+ * @param {object} options Options passed to {@link ProjectedImageCollection.fromContextSceneJson}.
+ * @returns {Promise<ProjectedImageCollection>}
+ */
+ProjectedImageCollection.fromContextSceneUrl = async function (url, options) {
+  //>>includeStart('debug', pragmas.debug);
+  Check.defined("url", url);
+  Check.typeOf.object("options", options);
+  //>>includeEnd('debug');
+
+  const resource = url instanceof Resource ? url : new Resource({ url: url });
+  const text = await resource.fetchText();
+  const sceneData = JSON.parse(text);
+  return ProjectedImageCollection.fromContextSceneJson(sceneData, options);
+};
+
+export default ProjectedImageCollection;
